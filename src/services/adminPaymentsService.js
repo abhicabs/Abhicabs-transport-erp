@@ -294,4 +294,31 @@ export const adminPaymentsService = {
     const data = await apiClient.get(`/bookings/number/${encodeURIComponent(bookingNumber)}`);
     return data.booking || data;
   },
+
+  // ---- Payment Links / QR / Collections (booking-centric) -----------------
+
+  /** Create (or reuse) a Razorpay payment link for a booking. */
+  async createPaymentLink(bookingId) {
+    return apiClient.post(`/admin/payments/bookings/${bookingId}/link`);
+  },
+
+  /** Create (or reuse) a QR code for a booking. */
+  async createPaymentQR(bookingId) {
+    return apiClient.post(`/admin/payments/bookings/${bookingId}/qr`);
+  },
+
+  /** All payment collections for a booking (links, QRs, orders, cash). */
+  async getCollections(bookingId) {
+    return apiClient.get(`/admin/payments/bookings/${bookingId}/collections`);
+  },
+
+  /** Cancel a payment / payment link by its payment id. */
+  async cancelPayment(paymentId) {
+    return apiClient.post(`/admin/payments/${paymentId}/cancel`);
+  },
+
+  /** Resend payment notification. medium: 'sms' | 'email'. */
+  async resendPayment(paymentId, medium) {
+    return apiClient.post(`/admin/payments/${paymentId}/resend`, { medium });
+  },
 };

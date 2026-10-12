@@ -8,10 +8,12 @@
  *   board.data?.vehicles?.vehicles  →  board.data?.vehicles?.available
  */
 import { useState, useCallback, useEffect } from 'react';
-import { Truck, Radio, AlertCircle, User, RefreshCw } from 'lucide-react';
+import { Truck, Radio, AlertCircle, User, RefreshCw, UserPlus, ChevronDown } from 'lucide-react';
 import PageHeader   from '../../components/ui/PageHeader';
 import Card         from '../../components/ui/Card';
 import Select       from '../../components/ui/Select';
+import Input        from '../../components/ui/Input';
+import FormField    from '../../components/ui/FormField';
 import Button       from '../../components/ui/Button';
 import StatusBadge  from '../../components/ui/StatusBadge';
 import EmptyState   from '../../components/ui/EmptyState';
@@ -39,6 +41,18 @@ export default function Dispatch() {
   const [assignments, setAssignments] = useState({});
   const [assigning,   setAssigning]   = useState({});
   const [suggestions, setSuggestions] = useState({}); // bookingId -> { loading, items, error }
+
+  // Manual entry mode — per-booking toggle between dropdown & free-text
+  const [manualMode, setManualMode] = useState({});
+  const [manualData, setManualData] = useState({});
+  const [addingTemp, setAddingTemp] = useState({});
+
+  const setManualField = (bookingId, key, value) =>
+    setManualData((p) => ({ ...p, [bookingId]: { ...p[bookingId], [key]: value } }));
+
+  const toggleManual = (bookingId) => {
+    setManualMode((p) => ({ ...p, [bookingId]: !p[bookingId] }));
+  };
 
   const board = useApi(() => apiClient.get('/admin/dispatch/board'), []);
 
@@ -74,6 +88,45 @@ export default function Dispatch() {
   const assignedDriverIds = new Set(
     Object.values(assignments).filter((a) => a.done && a.driverId).map((a) => a.driverId)
   );
+
+  // Create a temporary driver + vehicle via backend, then auto-assign
+  const addAndAssign = useCallback(async (bookingId) => {
+    const m = manualData[bookingId] || {};
+    if (!m.driverName?.trim()) { toast.error('Enter driver name'); return; }
+    if (!m.mobile?.trim()) { toast.error('Enter mobile number'); return; }
+    if (!m.vehicleNumber?.trim()) { toast.error('Enter vehicle number'); return; }
+
+    const booking = pendingBookings.find((b) => b.id === bookingId);
+    const vehicleClass = m.vehicleClass?.trim() || booking?.vehicleClass || 'sedan';
+
+    setAddingTemp((p) => ({ ...p, [bookingId]: true }));
+    try {
+      const res = await apiClient.post('/admin/temporary-drivers', {
+        name: m.driverName.trim(),
+        mobile: m.mobile.trim(),
+        vehicleNumber: m.vehicleNumber.trim(),
+        vehicleClass,
+      });
+      const tempDriver = res?.data?.driver || res?.driver || res?.data || {};
+      const vehicleId = tempDriver.vehicle?.id;
+      const driverId = tempDriver.userId;
+
+      if (!vehicleId) throw new Error('Temporary driver created but no vehicle ID returned');
+
+      await apiClient.post(`/admin/dispatch/bookings/${bookingId}/assign`, {
+        vehicleId,
+        ...(driverId ? { driverId } : {}),
+      });
+
+      setAssignments((p) => ({ ...p, [bookingId]: { vehicleId, driverId, done: true } }));
+      toast.success(`${m.driverName.trim()} (${m.vehicleNumber.trim()}) added and assigned`);
+      setTimeout(() => { board.refetch(); driversApi.refetch(); }, 800);
+    } catch (e) {
+      toast.error(e.message || 'Failed to add driver');
+    } finally {
+      setAddingTemp((p) => ({ ...p, [bookingId]: false }));
+    }
+  }, [manualData, pendingBookings, toast, board, driversApi]);
 
   function vehiclesForBooking(booking) {
     return availableVehicles.filter((v) => {
@@ -234,7 +287,7 @@ export default function Dispatch() {
     <div>
       <PageHeader
         title="Dispatch Board"
-        description="Assign vehicles and drivers to bookings. Only available vehicles matching the booking class are shown."
+        description="Assign vehicles and drivers to bookings — select from fleet or enter a temporary driver manually."
         actions={
           <div className="flex items-center gap-3">
             {availableVehicles.length > 0 && (
@@ -347,61 +400,117 @@ export default function Dispatch() {
                           </p>
                         </div>
                       )}
-                      <div className="flex gap-2 items-center">
-                        <Truck size={15} style={{ color: '#6B7280', flexShrink: 0 }} />
-                        {matchingVehicles.length === 0 ? (
-                          <div className="flex-1 rounded-lg px-3 py-2 text-xs"
-                            style={{ backgroundColor: '#FEF9C3', border: '1px solid #FDE047', color: '#854D0E' }}>
-                            {availableVehicles.length === 0
-                              ? 'No vehicles available'
-                              : `No ${titleCase(b.vehicleClass || '')} available — ${availableVehicles.length} other class${availableVehicles.length > 1 ? 'es' : ''} free`}
+                      {/* ── Mode toggle ── */}
+                      <div className="flex items-center gap-2 mb-1">
+                        <button type="button" onClick={() => toggleManual(b.id)}
+                          className="flex items-center gap-1.5 text-xs font-semibold"
+                          style={{
+                            padding: '4px 10px', borderRadius: 8, border: '1px solid #E5E7EB', cursor: 'pointer',
+                            backgroundColor: manualMode[b.id] ? '#EFF6FF' : '#F9FAFB',
+                            color: manualMode[b.id] ? '#1D4ED8' : '#6B7280',
+                          }}>
+                          {manualMode[b.id]
+                            ? <><ChevronDown size={12} /> Select from fleet</>
+                            : <><UserPlus size={12} /> Enter driver manually</>}
+                        </button>
+                        {manualMode[b.id] && <Badge tone="blue">Temporary hire</Badge>}
+                      </div>
+
+                      {manualMode[b.id] ? (
+                        /* ── Manual entry mode ── */
+                        <>
+                          <div className="grid grid-cols-2 gap-2">
+                            <FormField label="Driver name" required style={{ margin: 0 }}>
+                              <Input value={manualData[b.id]?.driverName || ''}
+                                onChange={(e) => setManualField(b.id, 'driverName', e.target.value)}
+                                placeholder="Ramesh Kumar" />
+                            </FormField>
+                            <FormField label="Mobile number" required style={{ margin: 0 }}>
+                              <Input value={manualData[b.id]?.mobile || ''}
+                                onChange={(e) => setManualField(b.id, 'mobile', e.target.value)}
+                                placeholder="9876543210" />
+                            </FormField>
                           </div>
-                        ) : (
-                          <Select
-                            value={a.vehicleId || ''}
-                            placeholder={`Vehicle — ${matchingVehicles.length} ${titleCase(b.vehicleClass || '')} available`}
-                            onChange={(e) => setField(b.id, 'vehicleId', e.target.value)}
-                            options={matchingVehicles.map((v) => ({
-                              value: v.id,
-                              label: `${v.registrationNumber} · ${v.makeModel} · ${v.seatingCapacity} seats`,
-                            }))}
-                          />
-                        )}
-                      </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <FormField label="Vehicle number" required style={{ margin: 0 }}>
+                              <Input value={manualData[b.id]?.vehicleNumber || ''}
+                                onChange={(e) => setManualField(b.id, 'vehicleNumber', e.target.value)}
+                                placeholder="KA 01 AB 1234" />
+                            </FormField>
+                            <FormField label="Vehicle class" style={{ margin: 0 }}
+                              hint={b.vehicleClass ? `Booking: ${titleCase(b.vehicleClass)}` : ''}>
+                              <Input value={manualData[b.id]?.vehicleClass || ''}
+                                onChange={(e) => setManualField(b.id, 'vehicleClass', e.target.value)}
+                                placeholder={b.vehicleClass || 'sedan'} />
+                            </FormField>
+                          </div>
+                          <div className="flex justify-end">
+                            <Button size="sm" icon={UserPlus} loading={addingTemp[b.id]}
+                              onClick={() => addAndAssign(b.id)}>
+                              Add Driver & Assign
+                            </Button>
+                          </div>
+                        </>
+                      ) : (
+                        /* ── Dropdown selection mode ── */
+                        <>
+                          <div className="flex gap-2 items-center">
+                            <Truck size={15} style={{ color: '#6B7280', flexShrink: 0 }} />
+                            {matchingVehicles.length === 0 ? (
+                              <div className="flex-1 rounded-lg px-3 py-2 text-xs"
+                                style={{ backgroundColor: '#FEF9C3', border: '1px solid #FDE047', color: '#854D0E' }}>
+                                {availableVehicles.length === 0
+                                  ? 'No vehicles available'
+                                  : `No ${titleCase(b.vehicleClass || '')} available — ${availableVehicles.length} other class${availableVehicles.length > 1 ? 'es' : ''} free`}
+                              </div>
+                            ) : (
+                              <Select
+                                value={a.vehicleId || ''}
+                                placeholder={`Vehicle — ${matchingVehicles.length} ${titleCase(b.vehicleClass || '')} available`}
+                                onChange={(e) => setField(b.id, 'vehicleId', e.target.value)}
+                                options={matchingVehicles.map((v) => ({
+                                  value: v.id,
+                                  label: `${v.registrationNumber} · ${v.makeModel} · ${v.seatingCapacity} seats`,
+                                }))}
+                              />
+                            )}
+                          </div>
 
-                      <div className="flex gap-2 items-center">
-                        <User size={15} style={{ color: '#6B7280', flexShrink: 0 }} />
-                        <Select
-                          value={a.driverId || ''}
-                          placeholder={
-                            availableDrivers.length === 0
-                              ? 'No verified drivers available'
-                              : `Driver (optional) — ${availableDrivers.filter((d) => d.isOnline).length} online`
-                          }
-                          onChange={(e) => setField(b.id, 'driverId', e.target.value || undefined)}
-                          options={[
-                            { value: '', label: 'No driver (assign vehicle only)' },
-                            ...availableDrivers.map((d) => ({
-                              value: d.userId,
-                              label: `${d.user?.name}${d.isOnline ? ' 🟢 Online' : ' ⚪ Offline'} · ${d.user?.phone || ''}`,
-                            })),
-                          ]}
-                        />
-                      </div>
+                          <div className="flex gap-2 items-center">
+                            <User size={15} style={{ color: '#6B7280', flexShrink: 0 }} />
+                            <Select
+                              value={a.driverId || ''}
+                              placeholder={
+                                availableDrivers.length === 0
+                                  ? 'No verified drivers available'
+                                  : `Driver (optional) — ${availableDrivers.filter((d) => d.isOnline).length} online · ${availableDrivers.filter((d) => !d.isOnline).length} offline`
+                              }
+                              onChange={(e) => setField(b.id, 'driverId', e.target.value || undefined)}
+                              options={[
+                                { value: '', label: 'No driver (assign vehicle only)' },
+                                ...availableDrivers.map((d) => ({
+                                  value: d.userId,
+                                  label: `${d.user?.name}${d.isOnline ? ' 🟢 Online' : ' ⚪ Offline'} · ${d.user?.phone || ''}`,
+                                })),
+                              ]}
+                            />
+                          </div>
 
-                      <div className="flex gap-2 justify-end">
-                        <Button size="sm" variant="secondary"
-                          loading={suggestions[b.id]?.loading}
-                          onClick={() => suggestDrivers(b.id)}>
-                          Suggest drivers
-                        </Button>
-                        <Button size="sm"
-                          disabled={!a.vehicleId}
-                          loading={assigning[b.id]}
-                          onClick={() => assign(b.id)}>
-                          Assign
-                        </Button>
-                      </div>
+                          <div className="flex gap-2 justify-end">
+                            <Button size="sm" variant="secondary"
+                              loading={suggestions[b.id]?.loading}
+                              onClick={() => suggestDrivers(b.id)}>
+                              Suggest drivers
+                            </Button>
+                            <Button size="sm"
+                              disabled={!a.vehicleId}
+                              loading={assigning[b.id]}
+                              onClick={() => assign(b.id)}>
+                              Assign
+                            </Button>
+                          </div>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>

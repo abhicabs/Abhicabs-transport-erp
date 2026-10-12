@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Banknote, CreditCard, Landmark, Wallet, Smartphone, Search, RotateCcw } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Banknote, CreditCard, Landmark, Wallet, Smartphone, Search, RotateCcw, Link2, Plus, ExternalLink, Copy, XCircle, RefreshCw, Send, QrCode } from 'lucide-react';
 import PageHeader  from '../../components/ui/PageHeader';
 import PageTabs from '../../components/ui/PageTabs';
 import FilterBar   from '../../components/ui/FilterBar';
@@ -12,6 +12,10 @@ import Select        from '../../components/ui/Select';
 import FormField    from '../../components/ui/FormField';
 import Textarea      from '../../components/ui/Textarea';
 import Modal          from '../../components/ui/Modal';
+import Alert         from '../../components/ui/Alert';
+import IconButton    from '../../components/ui/IconButton';
+import LoadingState  from '../../components/ui/LoadingState';
+import SearchInput   from '../../components/ui/SearchInput';
 import { useResourceList }    from '../../hooks/useResourceList';
 import { useApi } from '../../hooks/useApi';
 import { useToast } from '../../hooks/useToast';
@@ -553,11 +557,292 @@ function RefundsTab() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main page — three tabs, same pattern as Reports.jsx
+// Payment Links tab — booking-centric: link / QR / collections / cancel / resend
+// ─────────────────────────────────────────────────────────────────────────────
+
+const COLLECTION_STATUS_TONE = {
+  CREATED: 'blue', AUTHORISED: 'amber', CAPTURED: 'green',
+  PARTIALLY_PAID: 'amber', FAILED: 'red', REFUNDED: 'purple',
+  CANCELLED: 'slate', created: 'blue', paid: 'green', cancelled: 'slate',
+  expired: 'slate', partially_paid: 'amber',
+};
+
+function PaymentLinksTab() {
+  const toast = useToast();
+
+  const [bookingInput, setBookingInput] = useState('');
+  const [booking, setBooking] = useState(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupError, setLookupError] = useState('');
+
+  const [collections, setCollections] = useState([]);
+  const [collectionsLoading, setCollectionsLoading] = useState(false);
+
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [qrLoading, setQrLoading] = useState(false);
+  const [linkResult, setLinkResult] = useState(null);
+  const [qrResult, setQrResult] = useState(null);
+  const [actionId, setActionId] = useState(null);
+
+  const lookupBooking = async () => {
+    const val = bookingInput.trim();
+    if (!val) return;
+    setLookupLoading(true);
+    setLookupError('');
+    setBooking(null);
+    setCollections([]);
+    setLinkResult(null);
+    setQrResult(null);
+    try {
+      const b = await adminPaymentsService.findBookingByNumber(val);
+      if (!b || !b.id) throw new Error('Booking not found');
+      setBooking(b);
+      loadCollections(b.id);
+    } catch (e) { setLookupError(e.message || 'Not found'); }
+    finally { setLookupLoading(false); }
+  };
+
+  const loadCollections = async (bookingId) => {
+    setCollectionsLoading(true);
+    try {
+      const res = await adminPaymentsService.getCollections(bookingId);
+      const items = res?.data?.collections || res?.collections || res?.data?.payments || res?.payments || res?.data || [];
+      setCollections(Array.isArray(items) ? items : []);
+    } catch { setCollections([]); }
+    finally { setCollectionsLoading(false); }
+  };
+
+  const createLink = async () => {
+    if (!booking) return;
+    setLinkLoading(true); setLinkResult(null);
+    try {
+      const res = await adminPaymentsService.createPaymentLink(booking.id);
+      const link = res?.data?.payment || res?.data?.link || res?.payment || res?.link || res?.data || res;
+      setLinkResult(link);
+      toast.success(link.reused ? 'Existing payment link returned' : 'Payment link created');
+      loadCollections(booking.id);
+    } catch (e) { toast.error(e.message || 'Failed'); }
+    finally { setLinkLoading(false); }
+  };
+
+  const createQR = async () => {
+    if (!booking) return;
+    setQrLoading(true); setQrResult(null);
+    try {
+      const res = await adminPaymentsService.createPaymentQR(booking.id);
+      const qr = res?.data?.payment || res?.data?.qr || res?.payment || res?.qr || res?.data || res;
+      setQrResult(qr);
+      toast.success('QR code generated');
+      loadCollections(booking.id);
+    } catch (e) { toast.error(e.message || 'Failed'); }
+    finally { setQrLoading(false); }
+  };
+
+  const handleCancel = async (paymentId) => {
+    if (!confirm('Cancel this payment?')) return;
+    setActionId(paymentId);
+    try {
+      await adminPaymentsService.cancelPayment(paymentId);
+      toast.success('Payment cancelled');
+      if (booking) loadCollections(booking.id);
+    } catch (e) { toast.error(e.message || 'Cancel failed'); }
+    finally { setActionId(null); }
+  };
+
+  const handleResend = async (paymentId, medium) => {
+    setActionId(paymentId);
+    try {
+      await adminPaymentsService.resendPayment(paymentId, medium);
+      toast.success(`Notification resent via ${medium.toUpperCase()}`);
+    } catch (e) { toast.error(e.message || 'Resend failed'); }
+    finally { setActionId(null); }
+  };
+
+  const copyLink = (url) => {
+    if (!url) return;
+    navigator.clipboard.writeText(url).then(
+      () => toast.success('Copied to clipboard'),
+      () => toast.error('Copy failed')
+    );
+  };
+
+  const fare = booking ? (booking.finalFare ?? booking.estimatedFare ?? booking.amount) : null;
+
+  return (
+    <div className="space-y-5 mt-4">
+      {/* ── Step 1: Booking lookup ── */}
+      <div style={{ padding: '16px 20px', borderRadius: 14, backgroundColor: '#F9FAFB', border: '1.5px solid #E8E8E4' }}>
+        <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: '#6B7280' }}>1. Find Booking</p>
+        <div className="flex gap-2 items-end">
+          <FormField label="Booking number or ID" style={{ flex: 1, margin: 0 }}>
+            <Input value={bookingInput} onChange={(e) => setBookingInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && lookupBooking()} placeholder="ABH-2026-000123" />
+          </FormField>
+          <Button loading={lookupLoading} onClick={lookupBooking} style={{ marginBottom: 1 }}>
+            <Search size={14} className="mr-1" /> Look up
+          </Button>
+        </div>
+        {lookupError && <Alert type="warning" className="mt-3">{lookupError}</Alert>}
+        {booking && (
+          <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#fff', border: '1px solid #E5E7EB' }}>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <p style={{ fontWeight: 700, fontSize: 14, color: '#111' }}>{booking.bookingNumber || booking.id}</p>
+                <p className="text-xs mt-0.5" style={{ color: '#6B7280' }}>
+                  {booking.customer?.user?.name || booking.guestName || 'Customer'}
+                  {(booking.customer?.user?.phone || booking.guestPhone) && ` · ${booking.customer?.user?.phone || booking.guestPhone}`}
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <StatusBadge status={booking.status} />
+                {fare && <span style={{ fontWeight: 800, fontSize: 15, color: '#111' }}>₹{Number(fare).toLocaleString('en-IN')}</span>}
+              </div>
+            </div>
+            {(booking.advancePaid != null || booking.balanceDue != null) && (
+              <div className="flex gap-4 mt-2 text-xs" style={{ color: '#6B7280' }}>
+                {booking.advancePaid != null && <span>Advance: <strong style={{ color: '#15803D' }}>₹{Number(booking.advancePaid).toLocaleString('en-IN')}</strong></span>}
+                {booking.balanceDue != null && Number(booking.balanceDue) > 0 && <span>Balance: <strong style={{ color: '#DC2626' }}>₹{Number(booking.balanceDue).toLocaleString('en-IN')}</strong></span>}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Step 2: Actions ── */}
+      {booking && (
+        <div style={{ padding: '16px 20px', borderRadius: 14, backgroundColor: '#F9FAFB', border: '1.5px solid #E8E8E4' }}>
+          <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: '#6B7280' }}>2. Send Payment Link or QR</p>
+          <div className="flex gap-3 flex-wrap">
+            <Button icon={Link2} loading={linkLoading} onClick={createLink}>Generate Payment Link</Button>
+            <Button icon={QrCode} variant="secondary" loading={qrLoading} onClick={createQR}>Generate QR Code</Button>
+          </div>
+          {linkResult && (linkResult.shortUrl || linkResult.short_url) && (
+            <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#F0FDF4', border: '1.5px solid #BBF7D0' }}>
+              <p style={{ fontWeight: 700, fontSize: 13, color: '#15803D', marginBottom: 6 }}>✓ Payment Link {linkResult.reused ? '(existing)' : 'Created'}</p>
+              <div className="flex items-center gap-2">
+                <a href={linkResult.shortUrl || linkResult.short_url} target="_blank" rel="noopener noreferrer"
+                  style={{ flex: 1, fontSize: 13, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>
+                  {linkResult.shortUrl || linkResult.short_url}
+                </a>
+                <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(linkResult.shortUrl || linkResult.short_url)} />
+                <IconButton icon={ExternalLink} size="sm" label="Open" onClick={() => window.open(linkResult.shortUrl || linkResult.short_url, '_blank')} />
+              </div>
+              {linkResult.amount && <p className="text-xs mt-1" style={{ color: '#374151' }}>Amount: ₹{Number(linkResult.amount).toLocaleString('en-IN')}</p>}
+            </div>
+          )}
+          {qrResult && (
+            <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#EFF6FF', border: '1.5px solid #BFDBFE' }}>
+              <p style={{ fontWeight: 700, fontSize: 13, color: '#1D4ED8', marginBottom: 6 }}>✓ QR Code Generated</p>
+              {(qrResult.qrImageUrl || qrResult.image_url || qrResult.qr_image) && (
+                <div className="flex justify-center my-2">
+                  <img src={qrResult.qrImageUrl || qrResult.image_url || qrResult.qr_image} alt="Payment QR"
+                    style={{ width: 200, height: 200, borderRadius: 10, border: '1px solid #E5E7EB' }} />
+                </div>
+              )}
+              {(qrResult.shortUrl || qrResult.short_url) && (
+                <div className="flex items-center gap-2 mt-2">
+                  <a href={qrResult.shortUrl || qrResult.short_url} target="_blank" rel="noopener noreferrer"
+                    style={{ flex: 1, fontSize: 12, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>
+                    {qrResult.shortUrl || qrResult.short_url}
+                  </a>
+                  <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(qrResult.shortUrl || qrResult.short_url)} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Step 3: Collections ── */}
+      {booking && (
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs font-bold uppercase tracking-widest" style={{ color: '#6B7280' }}>3. Collections ({collections.length})</p>
+            <button onClick={() => loadCollections(booking.id)} className="text-xs font-medium flex items-center gap-1"
+              style={{ color: '#3B65DB', background: 'none', border: 'none', cursor: 'pointer' }}>
+              <RefreshCw size={11} /> Refresh
+            </button>
+          </div>
+          {collectionsLoading ? <LoadingState label="Loading collections…" /> : collections.length === 0 ? (
+            <div style={{ padding: '32px 16px', textAlign: 'center', borderRadius: 14, border: '1.5px dashed #E8E8E4', backgroundColor: '#FAFAFA' }}>
+              <Banknote size={28} className="mx-auto mb-2" style={{ color: '#D1D5DB' }} />
+              <p style={{ fontWeight: 700, fontSize: 13.5, color: '#6B7280' }}>No payment records yet</p>
+              <p style={{ fontSize: 12, color: '#9A9A9A', marginTop: 2 }}>Generate a payment link or QR above to start collecting.</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {collections.map((p) => {
+                const amt = Number(p.amount || 0);
+                const st = p.status || 'CREATED';
+                const isLive = ['CREATED', 'AUTHORISED', 'created'].includes(st);
+                const isCaptured = ['CAPTURED', 'paid'].includes(st);
+                const isCancelled = ['FAILED', 'REFUNDED', 'CANCELLED', 'cancelled', 'expired'].includes(st);
+                const url = p.shortUrl || p.short_url || null;
+                const method = p.method || p.purpose || '';
+                return (
+                  <div key={p.id || p.providerOrderId} style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 12,
+                    padding: '12px 16px', borderRadius: 14,
+                    border: `1.5px solid ${isCaptured ? '#BBF7D0' : '#E8E8E4'}`,
+                    backgroundColor: isCaptured ? '#F0FDF4' : '#fff',
+                    opacity: isCancelled ? 0.55 : 1,
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span style={{ fontWeight: 800, fontSize: 15, color: '#111' }}>₹{amt.toLocaleString('en-IN')}</span>
+                        <Badge tone={COLLECTION_STATUS_TONE[st] || 'slate'}>{titleCase(String(st).replace(/_/g, ' '))}</Badge>
+                        {method && <Badge tone="slate">{titleCase(String(method).replace(/_/g, ' '))}</Badge>}
+                      </div>
+                      <div className="flex items-center gap-3 text-xs flex-wrap" style={{ color: '#6B7280' }}>
+                        {p.paidAt && <span>Paid {formatDateTime(p.paidAt)}</span>}
+                        {!p.paidAt && p.createdAt && <span>Created {formatDateTime(p.createdAt)}</span>}
+                        {p.providerOrderId && <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#9CA3AF' }}>{p.providerOrderId}</span>}
+                      </div>
+                      {url && (
+                        <button onClick={() => copyLink(url)} className="flex items-center gap-1 text-xs mt-1"
+                          style={{ color: '#3B65DB', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                          <Link2 size={10} /> {url.replace('https://', '')}
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, flexShrink: 0, paddingTop: 2 }}>
+                      {url && <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(url)} />}
+                      {isLive && (
+                        <>
+                          <IconButton icon={Smartphone} size="sm" label="SMS" loading={actionId === p.id} onClick={() => handleResend(p.id, 'sms')} />
+                          <IconButton icon={Send} size="sm" label="Email" loading={actionId === p.id} onClick={() => handleResend(p.id, 'email')} />
+                          <IconButton icon={XCircle} size="sm" label="Cancel" variant="danger" loading={actionId === p.id} onClick={() => handleCancel(p.id)} />
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!booking && !lookupLoading && (
+        <div style={{ padding: '48px 16px', textAlign: 'center', borderRadius: 14, border: '1.5px dashed #E8E8E4', backgroundColor: '#FAFAFA' }}>
+          <Link2 size={32} className="mx-auto mb-2" style={{ color: '#D1D5DB' }} />
+          <p style={{ fontWeight: 700, fontSize: 14, color: '#6B7280' }}>Enter a booking number above to get started</p>
+          <p style={{ fontSize: 12.5, color: '#9A9A9A', marginTop: 4 }}>
+            Generate payment links and QR codes, view collections, resend notifications or cancel payments.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main page — four tabs
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TABS = [
   { key: 'payments', label: 'Payments' },
+  { key: 'payment-links', label: 'Payment Links', icon: Link2 },
   { key: 'cash-handovers', label: 'Cash Handovers' },
   { key: 'refunds', label: 'Refunds' },
 ];
@@ -569,12 +854,13 @@ export default function Payments() {
     <div>
       <PageHeader
         title="Payments"
-        description="All payment records, driver cash-handover reconciliation, and refunds."
+        description="All payment records, Razorpay payment links, driver cash-handover reconciliation, and refunds."
       />
 
       <PageTabs tabs={TABS} value={activeTab} onChange={setActiveTab} />
 
       {activeTab === 'payments'       && <PaymentsTab />}
+      {activeTab === 'payment-links'  && <PaymentLinksTab />}
       {activeTab === 'cash-handovers' && <CashHandoversTab />}
       {activeTab === 'refunds'        && <RefundsTab />}
     </div>
