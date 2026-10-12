@@ -321,4 +321,11 @@ export const adminPaymentsService = {
   async resendPayment(paymentId, medium) {
     return apiClient.post(`/admin/payments/${paymentId}/resend`, { medium });
   },
+
+  // ---- Standalone Payment Link (no booking) -------------------------------
+
+  /** Create a manual payment link — no booking required. */
+  async createStandaloneLink(body) {
+    return apiClient.post('/admin/payments/link', body);
+  },
 };

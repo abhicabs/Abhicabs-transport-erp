@@ -16,6 +16,7 @@ import Alert         from '../../components/ui/Alert';
 import IconButton    from '../../components/ui/IconButton';
 import LoadingState  from '../../components/ui/LoadingState';
 import SearchInput   from '../../components/ui/SearchInput';
+import Switch        from '../../components/ui/Switch';
 import { useResourceList }    from '../../hooks/useResourceList';
 import { useApi } from '../../hooks/useApi';
 import { useToast } from '../../hooks/useToast';
@@ -570,29 +571,48 @@ const COLLECTION_STATUS_TONE = {
 function PaymentLinksTab() {
   const toast = useToast();
 
+  // Tab mode: 'booking' or 'manual'
+  const [mode, setMode] = useState('booking');
+
+  // ── Booking-linked state ──
   const [bookingInput, setBookingInput] = useState('');
   const [booking, setBooking] = useState(null);
   const [lookupLoading, setLookupLoading] = useState(false);
   const [lookupError, setLookupError] = useState('');
-
   const [collections, setCollections] = useState([]);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
-
   const [linkLoading, setLinkLoading] = useState(false);
   const [qrLoading, setQrLoading] = useState(false);
   const [linkResult, setLinkResult] = useState(null);
   const [qrResult, setQrResult] = useState(null);
   const [actionId, setActionId] = useState(null);
 
+  // ── Standalone (manual) state ──
+  const [manualForm, setManualForm] = useState({
+    amount: '', customerName: '', customerPhone: '', customerEmail: '',
+    description: '', expireByMinutes: '', sendSms: true, sendEmail: false,
+  });
+  const [manualErrors, setManualErrors] = useState({});
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualResult, setManualResult] = useState(null);
+
+  const setMF = (k, v) => { setManualForm((f) => ({ ...f, [k]: v })); setManualErrors((e) => ({ ...e, [k]: undefined })); };
+
+  // ── Shared helpers ──
+  const copyLink = (url) => {
+    if (!url) return;
+    navigator.clipboard.writeText(url).then(
+      () => toast.success('Copied to clipboard'),
+      () => toast.error('Copy failed')
+    );
+  };
+
+  // ── Booking-linked handlers ──
   const lookupBooking = async () => {
     const val = bookingInput.trim();
     if (!val) return;
-    setLookupLoading(true);
-    setLookupError('');
-    setBooking(null);
-    setCollections([]);
-    setLinkResult(null);
-    setQrResult(null);
+    setLookupLoading(true); setLookupError(''); setBooking(null);
+    setCollections([]); setLinkResult(null); setQrResult(null);
     try {
       const b = await adminPaymentsService.findBookingByNumber(val);
       if (!b || !b.id) throw new Error('Booking not found');
@@ -619,7 +639,7 @@ function PaymentLinksTab() {
       const res = await adminPaymentsService.createPaymentLink(booking.id);
       const link = res?.data?.payment || res?.data?.link || res?.payment || res?.link || res?.data || res;
       setLinkResult(link);
-      toast.success(link.reused ? 'Existing payment link returned' : 'Payment link created');
+      toast.success(link.reused ? 'Existing link returned' : 'Payment link created');
       loadCollections(booking.id);
     } catch (e) { toast.error(e.message || 'Failed'); }
     finally { setLinkLoading(false); }
@@ -658,178 +678,313 @@ function PaymentLinksTab() {
     finally { setActionId(null); }
   };
 
-  const copyLink = (url) => {
-    if (!url) return;
-    navigator.clipboard.writeText(url).then(
-      () => toast.success('Copied to clipboard'),
-      () => toast.error('Copy failed')
-    );
+  // ── Standalone handler ──
+  const submitManualLink = async () => {
+    const f = manualForm;
+    const errs = {};
+    if (!f.amount || Number(f.amount) <= 0) errs.amount = 'Enter a valid amount';
+    if (!f.customerName.trim()) errs.customerName = 'Required';
+    if (!f.customerPhone.trim()) errs.customerPhone = 'Required';
+    if (f.customerPhone && !/^\+?\d{10,13}$/.test(f.customerPhone.replace(/\s/g, ''))) errs.customerPhone = 'Invalid phone';
+    if (f.customerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.customerEmail)) errs.customerEmail = 'Invalid email';
+    setManualErrors(errs);
+    if (Object.keys(errs).length) return;
+
+    setManualLoading(true);
+    try {
+      const body = {
+        amount: Number(f.amount),
+        customerName: f.customerName.trim(),
+        customerPhone: f.customerPhone.trim(),
+        description: f.description.trim() || `Payment — ${f.customerName.trim()}`,
+        sendSms: f.sendSms,
+        sendEmail: f.sendEmail,
+      };
+      if (f.customerEmail.trim()) body.customerEmail = f.customerEmail.trim();
+      if (f.expireByMinutes && Number(f.expireByMinutes) > 0) body.expireByMinutes = Number(f.expireByMinutes);
+
+      const res = await adminPaymentsService.createStandaloneLink(body);
+      const link = res?.data?.payment || res?.data?.link || res?.payment || res?.link || res?.data || res;
+      setManualResult(link);
+      toast.success('Payment link created');
+    } catch (e) { toast.error(e.message || 'Failed to create payment link'); }
+    finally { setManualLoading(false); }
   };
 
   const fare = booking ? (booking.finalFare ?? booking.estimatedFare ?? booking.amount) : null;
 
   return (
     <div className="space-y-5 mt-4">
-      {/* ── Step 1: Booking lookup ── */}
-      <div style={{ padding: '16px 20px', borderRadius: 14, backgroundColor: '#F9FAFB', border: '1.5px solid #E8E8E4' }}>
-        <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: '#6B7280' }}>1. Find Booking</p>
-        <div className="flex gap-2 items-end">
-          <FormField label="Booking number or ID" style={{ flex: 1, margin: 0 }}>
-            <Input value={bookingInput} onChange={(e) => setBookingInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && lookupBooking()} placeholder="ABH-2026-000123" />
-          </FormField>
-          <Button loading={lookupLoading} onClick={lookupBooking} style={{ marginBottom: 1 }}>
-            <Search size={14} className="mr-1" /> Look up
-          </Button>
-        </div>
-        {lookupError && <Alert type="warning" className="mt-3">{lookupError}</Alert>}
-        {booking && (
-          <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#fff', border: '1px solid #E5E7EB' }}>
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <div>
-                <p style={{ fontWeight: 700, fontSize: 14, color: '#111' }}>{booking.bookingNumber || booking.id}</p>
-                <p className="text-xs mt-0.5" style={{ color: '#6B7280' }}>
-                  {booking.customer?.user?.name || booking.guestName || 'Customer'}
-                  {(booking.customer?.user?.phone || booking.guestPhone) && ` · ${booking.customer?.user?.phone || booking.guestPhone}`}
-                </p>
-              </div>
-              <div className="flex items-center gap-3">
-                <StatusBadge status={booking.status} />
-                {fare && <span style={{ fontWeight: 800, fontSize: 15, color: '#111' }}>₹{Number(fare).toLocaleString('en-IN')}</span>}
-              </div>
+      {/* ── Mode selector ── */}
+      <div className="flex gap-2">
+        {[
+          { key: 'booking', label: 'From Booking', icon: '📋' },
+          { key: 'manual', label: 'Manual Link', icon: '✏️' },
+        ].map((t) => (
+          <button key={t.key} type="button" onClick={() => { setMode(t.key); setManualResult(null); }}
+            style={{
+              padding: '8px 18px', borderRadius: 10, fontWeight: 700, fontSize: 13,
+              border: `2px solid ${mode === t.key ? '#3B65DB' : '#E8E8E4'}`,
+              backgroundColor: mode === t.key ? '#EFF6FF' : '#fff',
+              color: mode === t.key ? '#1D4ED8' : '#6B7280',
+              cursor: 'pointer',
+            }}>
+            {t.icon} {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ════════════════════════════════════════════════════════════════════ */}
+      {/* BOOKING MODE                                                       */}
+      {/* ════════════════════════════════════════════════════════════════════ */}
+      {mode === 'booking' && (
+        <>
+          {/* Step 1: Lookup */}
+          <div style={{ padding: '16px 20px', borderRadius: 14, backgroundColor: '#F9FAFB', border: '1.5px solid #E8E8E4' }}>
+            <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: '#6B7280' }}>1. Find Booking</p>
+            <div className="flex gap-2 items-end">
+              <FormField label="Booking number or ID" style={{ flex: 1, margin: 0 }}>
+                <Input value={bookingInput} onChange={(e) => setBookingInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && lookupBooking()} placeholder="ABH-2026-000123" />
+              </FormField>
+              <Button loading={lookupLoading} onClick={lookupBooking} style={{ marginBottom: 1 }}>
+                <Search size={14} className="mr-1" /> Look up
+              </Button>
             </div>
-            {(booking.advancePaid != null || booking.balanceDue != null) && (
-              <div className="flex gap-4 mt-2 text-xs" style={{ color: '#6B7280' }}>
-                {booking.advancePaid != null && <span>Advance: <strong style={{ color: '#15803D' }}>₹{Number(booking.advancePaid).toLocaleString('en-IN')}</strong></span>}
-                {booking.balanceDue != null && Number(booking.balanceDue) > 0 && <span>Balance: <strong style={{ color: '#DC2626' }}>₹{Number(booking.balanceDue).toLocaleString('en-IN')}</strong></span>}
+            {lookupError && <Alert type="warning" className="mt-3">{lookupError}</Alert>}
+            {booking && (
+              <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#fff', border: '1px solid #E5E7EB' }}>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div>
+                    <p style={{ fontWeight: 700, fontSize: 14, color: '#111' }}>{booking.bookingNumber || booking.id}</p>
+                    <p className="text-xs mt-0.5" style={{ color: '#6B7280' }}>
+                      {booking.customer?.user?.name || booking.guestName || 'Customer'}
+                      {(booking.customer?.user?.phone || booking.guestPhone) && ` · ${booking.customer?.user?.phone || booking.guestPhone}`}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <StatusBadge status={booking.status} />
+                    {fare && <span style={{ fontWeight: 800, fontSize: 15, color: '#111' }}>₹{Number(fare).toLocaleString('en-IN')}</span>}
+                  </div>
+                </div>
+                {(booking.advancePaid != null || booking.balanceDue != null) && (
+                  <div className="flex gap-4 mt-2 text-xs" style={{ color: '#6B7280' }}>
+                    {booking.advancePaid != null && <span>Advance: <strong style={{ color: '#15803D' }}>₹{Number(booking.advancePaid).toLocaleString('en-IN')}</strong></span>}
+                    {booking.balanceDue != null && Number(booking.balanceDue) > 0 && <span>Balance: <strong style={{ color: '#DC2626' }}>₹{Number(booking.balanceDue).toLocaleString('en-IN')}</strong></span>}
+                  </div>
+                )}
               </div>
             )}
           </div>
-        )}
-      </div>
 
-      {/* ── Step 2: Actions ── */}
-      {booking && (
-        <div style={{ padding: '16px 20px', borderRadius: 14, backgroundColor: '#F9FAFB', border: '1.5px solid #E8E8E4' }}>
-          <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: '#6B7280' }}>2. Send Payment Link or QR</p>
-          <div className="flex gap-3 flex-wrap">
-            <Button icon={Link2} loading={linkLoading} onClick={createLink}>Generate Payment Link</Button>
-            <Button icon={QrCode} variant="secondary" loading={qrLoading} onClick={createQR}>Generate QR Code</Button>
-          </div>
-          {linkResult && (linkResult.shortUrl || linkResult.short_url) && (
-            <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#F0FDF4', border: '1.5px solid #BBF7D0' }}>
-              <p style={{ fontWeight: 700, fontSize: 13, color: '#15803D', marginBottom: 6 }}>✓ Payment Link {linkResult.reused ? '(existing)' : 'Created'}</p>
-              <div className="flex items-center gap-2">
-                <a href={linkResult.shortUrl || linkResult.short_url} target="_blank" rel="noopener noreferrer"
-                  style={{ flex: 1, fontSize: 13, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>
-                  {linkResult.shortUrl || linkResult.short_url}
-                </a>
-                <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(linkResult.shortUrl || linkResult.short_url)} />
-                <IconButton icon={ExternalLink} size="sm" label="Open" onClick={() => window.open(linkResult.shortUrl || linkResult.short_url, '_blank')} />
+          {/* Step 2: Generate */}
+          {booking && (
+            <div style={{ padding: '16px 20px', borderRadius: 14, backgroundColor: '#F9FAFB', border: '1.5px solid #E8E8E4' }}>
+              <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: '#6B7280' }}>2. Send Payment Link or QR</p>
+              <div className="flex gap-3 flex-wrap">
+                <Button icon={Link2} loading={linkLoading} onClick={createLink}>Generate Payment Link</Button>
+                <Button icon={QrCode} variant="secondary" loading={qrLoading} onClick={createQR}>Generate QR Code</Button>
               </div>
-              {linkResult.amount && <p className="text-xs mt-1" style={{ color: '#374151' }}>Amount: ₹{Number(linkResult.amount).toLocaleString('en-IN')}</p>}
-            </div>
-          )}
-          {qrResult && (
-            <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#EFF6FF', border: '1.5px solid #BFDBFE' }}>
-              <p style={{ fontWeight: 700, fontSize: 13, color: '#1D4ED8', marginBottom: 6 }}>✓ QR Code Generated</p>
-              {(qrResult.qrImageUrl || qrResult.image_url || qrResult.qr_image) && (
-                <div className="flex justify-center my-2">
-                  <img src={qrResult.qrImageUrl || qrResult.image_url || qrResult.qr_image} alt="Payment QR"
-                    style={{ width: 200, height: 200, borderRadius: 10, border: '1px solid #E5E7EB' }} />
+              {linkResult && (linkResult.shortUrl || linkResult.short_url) && (
+                <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#F0FDF4', border: '1.5px solid #BBF7D0' }}>
+                  <p style={{ fontWeight: 700, fontSize: 13, color: '#15803D', marginBottom: 6 }}>✓ Payment Link {linkResult.reused ? '(existing)' : 'Created'}</p>
+                  <div className="flex items-center gap-2">
+                    <a href={linkResult.shortUrl || linkResult.short_url} target="_blank" rel="noopener noreferrer"
+                      style={{ flex: 1, fontSize: 13, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>{linkResult.shortUrl || linkResult.short_url}</a>
+                    <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(linkResult.shortUrl || linkResult.short_url)} />
+                    <IconButton icon={ExternalLink} size="sm" label="Open" onClick={() => window.open(linkResult.shortUrl || linkResult.short_url, '_blank')} />
+                  </div>
                 </div>
               )}
-              {(qrResult.shortUrl || qrResult.short_url) && (
-                <div className="flex items-center gap-2 mt-2">
-                  <a href={qrResult.shortUrl || qrResult.short_url} target="_blank" rel="noopener noreferrer"
-                    style={{ flex: 1, fontSize: 12, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>
-                    {qrResult.shortUrl || qrResult.short_url}
-                  </a>
-                  <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(qrResult.shortUrl || qrResult.short_url)} />
+              {qrResult && (
+                <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#EFF6FF', border: '1.5px solid #BFDBFE' }}>
+                  <p style={{ fontWeight: 700, fontSize: 13, color: '#1D4ED8', marginBottom: 6 }}>✓ QR Code Generated</p>
+                  {(qrResult.qrImageUrl || qrResult.image_url || qrResult.qr_image) && (
+                    <div className="flex justify-center my-2">
+                      <img src={qrResult.qrImageUrl || qrResult.image_url || qrResult.qr_image} alt="QR"
+                        style={{ width: 200, height: 200, borderRadius: 10, border: '1px solid #E5E7EB' }} />
+                    </div>
+                  )}
+                  {(qrResult.shortUrl || qrResult.short_url) && (
+                    <div className="flex items-center gap-2 mt-2">
+                      <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>{(qrResult.shortUrl || qrResult.short_url).replace('https://', '')}</span>
+                      <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(qrResult.shortUrl || qrResult.short_url)} />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           )}
-        </div>
+
+          {/* Step 3: Collections */}
+          {booking && (
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs font-bold uppercase tracking-widest" style={{ color: '#6B7280' }}>3. Collections ({collections.length})</p>
+                <button onClick={() => loadCollections(booking.id)} className="text-xs font-medium flex items-center gap-1"
+                  style={{ color: '#3B65DB', background: 'none', border: 'none', cursor: 'pointer' }}>
+                  <RefreshCw size={11} /> Refresh
+                </button>
+              </div>
+              {collectionsLoading ? <LoadingState label="Loading collections…" /> : collections.length === 0 ? (
+                <div style={{ padding: '32px 16px', textAlign: 'center', borderRadius: 14, border: '1.5px dashed #E8E8E4', backgroundColor: '#FAFAFA' }}>
+                  <Banknote size={28} className="mx-auto mb-2" style={{ color: '#D1D5DB' }} />
+                  <p style={{ fontWeight: 700, fontSize: 13.5, color: '#6B7280' }}>No payment records yet</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {collections.map((p) => {
+                    const amt = Number(p.amount || 0);
+                    const st = p.status || 'CREATED';
+                    const isLive = ['CREATED', 'AUTHORISED', 'created'].includes(st);
+                    const isCaptured = ['CAPTURED', 'paid'].includes(st);
+                    const isCancelled = ['FAILED', 'REFUNDED', 'CANCELLED', 'cancelled', 'expired'].includes(st);
+                    const url = p.shortUrl || p.short_url || null;
+                    const method = p.method || p.purpose || '';
+                    return (
+                      <div key={p.id || p.providerOrderId} style={{
+                        display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 16px', borderRadius: 14,
+                        border: `1.5px solid ${isCaptured ? '#BBF7D0' : '#E8E8E4'}`,
+                        backgroundColor: isCaptured ? '#F0FDF4' : '#fff', opacity: isCancelled ? 0.55 : 1,
+                      }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            <span style={{ fontWeight: 800, fontSize: 15, color: '#111' }}>₹{amt.toLocaleString('en-IN')}</span>
+                            <Badge tone={COLLECTION_STATUS_TONE[st] || 'slate'}>{titleCase(String(st).replace(/_/g, ' '))}</Badge>
+                            {method && <Badge tone="slate">{titleCase(String(method).replace(/_/g, ' '))}</Badge>}
+                          </div>
+                          <div className="flex items-center gap-3 text-xs flex-wrap" style={{ color: '#6B7280' }}>
+                            {p.paidAt && <span>Paid {formatDateTime(p.paidAt)}</span>}
+                            {!p.paidAt && p.createdAt && <span>Created {formatDateTime(p.createdAt)}</span>}
+                          </div>
+                          {url && (
+                            <button onClick={() => copyLink(url)} className="flex items-center gap-1 text-xs mt-1"
+                              style={{ color: '#3B65DB', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                              <Link2 size={10} /> {url.replace('https://', '')}
+                            </button>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', gap: 4, flexShrink: 0, paddingTop: 2 }}>
+                          {url && <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(url)} />}
+                          {isLive && (
+                            <>
+                              <IconButton icon={Smartphone} size="sm" label="SMS" loading={actionId === p.id} onClick={() => handleResend(p.id, 'sms')} />
+                              <IconButton icon={Send} size="sm" label="Email" loading={actionId === p.id} onClick={() => handleResend(p.id, 'email')} />
+                              <IconButton icon={XCircle} size="sm" label="Cancel" variant="danger" loading={actionId === p.id} onClick={() => handleCancel(p.id)} />
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!booking && !lookupLoading && (
+            <div style={{ padding: '40px 16px', textAlign: 'center', borderRadius: 14, border: '1.5px dashed #E8E8E4', backgroundColor: '#FAFAFA' }}>
+              <Link2 size={28} className="mx-auto mb-2" style={{ color: '#D1D5DB' }} />
+              <p style={{ fontWeight: 700, fontSize: 13.5, color: '#6B7280' }}>Enter a booking number above</p>
+              <p style={{ fontSize: 12, color: '#9A9A9A', marginTop: 4 }}>Amount is auto-calculated from the booking fare.</p>
+            </div>
+          )}
+        </>
       )}
 
-      {/* ── Step 3: Collections ── */}
-      {booking && (
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-xs font-bold uppercase tracking-widest" style={{ color: '#6B7280' }}>3. Collections ({collections.length})</p>
-            <button onClick={() => loadCollections(booking.id)} className="text-xs font-medium flex items-center gap-1"
-              style={{ color: '#3B65DB', background: 'none', border: 'none', cursor: 'pointer' }}>
-              <RefreshCw size={11} /> Refresh
-            </button>
-          </div>
-          {collectionsLoading ? <LoadingState label="Loading collections…" /> : collections.length === 0 ? (
-            <div style={{ padding: '32px 16px', textAlign: 'center', borderRadius: 14, border: '1.5px dashed #E8E8E4', backgroundColor: '#FAFAFA' }}>
-              <Banknote size={28} className="mx-auto mb-2" style={{ color: '#D1D5DB' }} />
-              <p style={{ fontWeight: 700, fontSize: 13.5, color: '#6B7280' }}>No payment records yet</p>
-              <p style={{ fontSize: 12, color: '#9A9A9A', marginTop: 2 }}>Generate a payment link or QR above to start collecting.</p>
+      {/* ════════════════════════════════════════════════════════════════════ */}
+      {/* MANUAL / STANDALONE MODE                                           */}
+      {/* ════════════════════════════════════════════════════════════════════ */}
+      {mode === 'manual' && (
+        <div style={{ padding: '20px 24px', borderRadius: 14, backgroundColor: '#F9FAFB', border: '1.5px solid #E8E8E4' }}>
+          {manualResult ? (
+            /* ── Success ── */
+            <div>
+              <div style={{ padding: '16px', borderRadius: 14, backgroundColor: '#F0FDF4', border: '1.5px solid #BBF7D0', marginBottom: 16 }}>
+                <p style={{ fontWeight: 700, fontSize: 14, color: '#15803D', marginBottom: 8 }}>✓ Payment link created</p>
+                <div className="space-y-2" style={{ fontSize: 13, color: '#374151' }}>
+                  <div className="flex items-center justify-between">
+                    <span style={{ color: '#6B7280' }}>Amount</span>
+                    <span style={{ fontWeight: 800, fontSize: 16 }}>₹{Number(manualResult.amount || manualForm.amount).toLocaleString('en-IN')}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span style={{ color: '#6B7280' }}>Customer</span>
+                    <span style={{ fontWeight: 600 }}>{manualResult.customerName || manualForm.customerName} · {manualResult.customerPhone || manualForm.customerPhone}</span>
+                  </div>
+                  {(manualResult.shortUrl || manualResult.short_url) && (
+                    <div style={{ marginTop: 8, padding: '10px 12px', borderRadius: 10, backgroundColor: '#fff', border: '1px solid #E5E7EB' }}>
+                      <p style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', marginBottom: 4 }}>Payment Link</p>
+                      <div className="flex items-center gap-2">
+                        <a href={manualResult.shortUrl || manualResult.short_url} target="_blank" rel="noopener noreferrer"
+                          style={{ flex: 1, fontSize: 13, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>
+                          {manualResult.shortUrl || manualResult.short_url}
+                        </a>
+                        <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(manualResult.shortUrl || manualResult.short_url)} />
+                        <IconButton icon={ExternalLink} size="sm" label="Open" onClick={() => window.open(manualResult.shortUrl || manualResult.short_url, '_blank')} />
+                      </div>
+                    </div>
+                  )}
+                  {manualForm.sendSms && <p style={{ fontSize: 12, color: '#15803D', marginTop: 4 }}>📱 SMS sent to {manualResult.customerPhone || manualForm.customerPhone}</p>}
+                  {manualForm.sendEmail && manualForm.customerEmail && <p style={{ fontSize: 12, color: '#15803D' }}>✉️ Email sent to {manualForm.customerEmail}</p>}
+                </div>
+              </div>
+              <div className="flex gap-3 justify-end">
+                <Button variant="secondary" onClick={() => {
+                  setManualResult(null);
+                  setManualForm({ amount: '', customerName: '', customerPhone: '', customerEmail: '', description: '', expireByMinutes: '', sendSms: true, sendEmail: false });
+                }}>Create Another</Button>
+                <Button onClick={() => { setManualResult(null); setMode('booking'); }}>Done</Button>
+              </div>
             </div>
           ) : (
-            <div className="space-y-2">
-              {collections.map((p) => {
-                const amt = Number(p.amount || 0);
-                const st = p.status || 'CREATED';
-                const isLive = ['CREATED', 'AUTHORISED', 'created'].includes(st);
-                const isCaptured = ['CAPTURED', 'paid'].includes(st);
-                const isCancelled = ['FAILED', 'REFUNDED', 'CANCELLED', 'cancelled', 'expired'].includes(st);
-                const url = p.shortUrl || p.short_url || null;
-                const method = p.method || p.purpose || '';
-                return (
-                  <div key={p.id || p.providerOrderId} style={{
-                    display: 'flex', alignItems: 'flex-start', gap: 12,
-                    padding: '12px 16px', borderRadius: 14,
-                    border: `1.5px solid ${isCaptured ? '#BBF7D0' : '#E8E8E4'}`,
-                    backgroundColor: isCaptured ? '#F0FDF4' : '#fff',
-                    opacity: isCancelled ? 0.55 : 1,
-                  }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <span style={{ fontWeight: 800, fontSize: 15, color: '#111' }}>₹{amt.toLocaleString('en-IN')}</span>
-                        <Badge tone={COLLECTION_STATUS_TONE[st] || 'slate'}>{titleCase(String(st).replace(/_/g, ' '))}</Badge>
-                        {method && <Badge tone="slate">{titleCase(String(method).replace(/_/g, ' '))}</Badge>}
-                      </div>
-                      <div className="flex items-center gap-3 text-xs flex-wrap" style={{ color: '#6B7280' }}>
-                        {p.paidAt && <span>Paid {formatDateTime(p.paidAt)}</span>}
-                        {!p.paidAt && p.createdAt && <span>Created {formatDateTime(p.createdAt)}</span>}
-                        {p.providerOrderId && <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#9CA3AF' }}>{p.providerOrderId}</span>}
-                      </div>
-                      {url && (
-                        <button onClick={() => copyLink(url)} className="flex items-center gap-1 text-xs mt-1"
-                          style={{ color: '#3B65DB', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-                          <Link2 size={10} /> {url.replace('https://', '')}
-                        </button>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', gap: 4, flexShrink: 0, paddingTop: 2 }}>
-                      {url && <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(url)} />}
-                      {isLive && (
-                        <>
-                          <IconButton icon={Smartphone} size="sm" label="SMS" loading={actionId === p.id} onClick={() => handleResend(p.id, 'sms')} />
-                          <IconButton icon={Send} size="sm" label="Email" loading={actionId === p.id} onClick={() => handleResend(p.id, 'email')} />
-                          <IconButton icon={XCircle} size="sm" label="Cancel" variant="danger" loading={actionId === p.id} onClick={() => handleCancel(p.id)} />
-                        </>
-                      )}
-                    </div>
+            /* ── Form ── */
+            <>
+              <p className="text-xs font-bold uppercase tracking-widest mb-4" style={{ color: '#6B7280' }}>
+                Create Payment Link (no booking)
+              </p>
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <FormField label="Amount (₹)" required error={manualErrors.amount}>
+                    <Input type="number" min="1" step="0.01" value={manualForm.amount}
+                      onChange={(e) => setMF('amount', e.target.value)} placeholder="4250" />
+                  </FormField>
+                  <FormField label="Customer name" required error={manualErrors.customerName}>
+                    <Input value={manualForm.customerName}
+                      onChange={(e) => setMF('customerName', e.target.value)} placeholder="Rajesh Kumar" />
+                  </FormField>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <FormField label="Phone" required error={manualErrors.customerPhone} hint="SMS is sent here">
+                    <Input value={manualForm.customerPhone}
+                      onChange={(e) => setMF('customerPhone', e.target.value)} placeholder="+919876543210" />
+                  </FormField>
+                  <FormField label="Email (optional)" error={manualErrors.customerEmail}>
+                    <Input type="email" value={manualForm.customerEmail}
+                      onChange={(e) => setMF('customerEmail', e.target.value)} placeholder="customer@example.com" />
+                  </FormField>
+                </div>
+                <FormField label="Description" hint="Shown on the Razorpay payment page">
+                  <Input value={manualForm.description}
+                    onChange={(e) => setMF('description', e.target.value)} placeholder="Balance payment for trip" />
+                </FormField>
+                <div className="grid grid-cols-2 gap-3">
+                  <FormField label="Auto-expire (minutes)" hint="Empty = no expiry">
+                    <Input type="number" min="1" value={manualForm.expireByMinutes}
+                      onChange={(e) => setMF('expireByMinutes', e.target.value)} placeholder="e.g. 1440 (24h)" />
+                  </FormField>
+                  <div className="space-y-2" style={{ paddingTop: 22 }}>
+                    <Switch checked={manualForm.sendSms} onChange={(v) => setMF('sendSms', v)} label="Send SMS" />
+                    <Switch checked={manualForm.sendEmail} onChange={(v) => setMF('sendEmail', v)} label="Send Email" />
                   </div>
-                );
-              })}
-            </div>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 4 }}>
+                  <Button icon={Send} loading={manualLoading} onClick={submitManualLink}>
+                    Create Payment Link
+                  </Button>
+                </div>
+              </div>
+            </>
           )}
-        </div>
-      )}
-
-      {!booking && !lookupLoading && (
-        <div style={{ padding: '48px 16px', textAlign: 'center', borderRadius: 14, border: '1.5px dashed #E8E8E4', backgroundColor: '#FAFAFA' }}>
-          <Link2 size={32} className="mx-auto mb-2" style={{ color: '#D1D5DB' }} />
-          <p style={{ fontWeight: 700, fontSize: 14, color: '#6B7280' }}>Enter a booking number above to get started</p>
-          <p style={{ fontSize: 12.5, color: '#9A9A9A', marginTop: 4 }}>
-            Generate payment links and QR codes, view collections, resend notifications or cancel payments.
-          </p>
         </div>
       )}
     </div>
