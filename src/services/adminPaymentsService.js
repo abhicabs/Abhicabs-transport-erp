@@ -297,14 +297,41 @@ export const adminPaymentsService = {
 
   // ---- Payment Links / QR / Collections (booking-centric) -----------------
 
-  /** Create (or reuse) a Razorpay payment link for a booking. */
-  async createPaymentLink(bookingId) {
-    return apiClient.post(`/admin/payments/bookings/${bookingId}/link`);
+  /**
+   * Create (or reuse) a Razorpay payment link for a booking.
+   *
+   * `purpose` defaults to 'BALANCE' — the normal case where the trip is done
+   * and the balance is outstanding. Pass 'ADVANCE' for a pre-trip part-payment,
+   * or 'FULL' when collecting the entire fare upfront. The backend caps the
+   * amount at what the booking actually owes, so an over-stated purpose is safe.
+   *
+   * The body is REQUIRED by the backend (POST /admin/payments/bookings/:id/link
+   * validates it against createLinkSchema). Calling without a body was sending
+   * `undefined`, which Zod rejected with a 400 and the UI showed a generic
+   * "Failed" toast with no useful message.
+   */
+  async createPaymentLink(bookingId, { purpose = 'BALANCE', amount, description, notifyBySms, notifyByEmail, expiresInHours } = {}) {
+    const body = { purpose };
+    if (amount != null) body.amount = amount;
+    if (description) body.description = description;
+    if (notifyBySms != null) body.notifyBySms = notifyBySms;
+    if (notifyByEmail != null) body.notifyByEmail = notifyByEmail;
+    if (expiresInHours != null) body.expiresInHours = expiresInHours;
+    return apiClient.post(`/admin/payments/bookings/${bookingId}/link`, body);
   },
 
-  /** Create (or reuse) a QR code for a booking. */
-  async createPaymentQR(bookingId) {
-    return apiClient.post(`/admin/payments/bookings/${bookingId}/qr`);
+  /**
+   * Create (or reuse) a UPI QR code for a booking.
+   *
+   * Same `purpose` semantics as createPaymentLink. The backend's createQrSchema
+   * also requires a body with `purpose` — calling without one was the same 400.
+   */
+  async createPaymentQR(bookingId, { purpose = 'BALANCE', amount, description, expiresInHours } = {}) {
+    const body = { purpose };
+    if (amount != null) body.amount = amount;
+    if (description) body.description = description;
+    if (expiresInHours != null) body.expiresInHours = expiresInHours;
+    return apiClient.post(`/admin/payments/bookings/${bookingId}/qr`, body);
   },
 
   /** All payment collections for a booking (links, QRs, orders, cash). */
