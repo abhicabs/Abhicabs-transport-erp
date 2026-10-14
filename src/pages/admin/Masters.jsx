@@ -53,6 +53,7 @@ const EMPTY_RATE_CARD = {
   // "Also price the other trip type" -- create only. A vehicle carries TWO
   // per-km rates: one-way (all-in, the empty return is priced into the rate)
   // and round trip (lower, both legs carry the passenger).
+  // The other trip type's per-km rate is optional, and only offered when creating
   pairEnabled: false, pairPerKm: '', pairMinKmPerDay: '',
   minKmPerDay: '', waitingPerHour: '', freeWaitingMin: '',
   driverAllowance: '',
@@ -1235,8 +1236,8 @@ function TierSurgeCard({ tier, rule, onSave }) {
           <p style={{ fontSize: 12, color: '#6B7280', fontWeight: 500 }}>{meta.desc}. Admin only. Applies to new quotes, not bookings already made.</p>
         </div>
         <Badge tone={liveNow ? meta.tone : 'slate'}>{liveNow ? `Live: ${Number(rule.standardPct)}% scheduled / ${Number(rule.immediatePct)}% urgent` : 'Not charging'}</Badge>
+    
       </div>
-
       <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 20 }}>{meta.icon}</span>
@@ -1255,6 +1256,8 @@ function TierSurgeCard({ tier, rule, onSave }) {
             <Input type="number" min="1" max="1440" value={form.immediateWithinMinutes} disabled={!on} onChange={(e) => set('immediateWithinMinutes', e.target.value)} style={{ textAlign: 'center' }} />
             {winErr(form.immediateWithinMinutes) && <p style={{ fontSize: 11, color: '#DC2626', marginTop: 2 }}>Enter {winErr(form.immediateWithinMinutes)}</p>}
           </div>
+
+
           <div style={{ alignSelf: 'flex-end' }}>
             <Button size="sm" icon={Save} onClick={save} loading={saving} disabled={!dirty || !!invalid}
               style={!dirty || invalid ? {} : { backgroundColor: '#22A65A', boxShadow: '0 3px 8px rgba(34,166,90,0.25)' }}>Save</Button>
