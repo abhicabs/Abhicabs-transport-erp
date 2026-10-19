@@ -52,10 +52,7 @@ export default function ResetPassword() {
     <div className="min-h-screen flex items-center justify-center p-4" style={{ backgroundColor: '#F7F8FC' }}>
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-2 mb-8">
-          <div className="h-9 w-9 rounded-xl grid place-items-center" style={{ backgroundColor: '#111' }}>
-            <img src="/brand/abhicabs-mark-dark.svg" alt={APP_NAME} style={{ height: 20, width: 20 }} />
-          </div>
-          <span className="font-bold" style={{ color: '#1F2937' }}>{APP_NAME}</span>
+          <img src="/brand/abhi-cabs-logo-new.svg" alt={APP_NAME} style={{ height: 44 }} />
         </div>
 
         {verifying ? (

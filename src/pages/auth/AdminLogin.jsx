@@ -28,75 +28,102 @@ export default function AdminLogin() {
     });
 
   return (
-    <div className="min-h-screen grid lg:grid-cols-2" style={{ backgroundColor: '#F9F9F7' }}>
+    <div className="min-h-screen grid lg:grid-cols-5" style={{ backgroundColor: '#FAFAFA' }}>
 
-      {/* ── Brand panel ── */}
+      {/* ── Brand panel — spans 3 of 5 cols ── */}
       <div
-        className="hidden lg:flex flex-col justify-between p-12"
-        style={{ backgroundColor: '#111111' }}
+        className="hidden lg:flex flex-col col-span-3 relative overflow-hidden"
+        style={{ backgroundColor: '#0A0A0A' }}
       >
-        <div className="flex items-center gap-3">
+        {/* Subtle radial glow behind the content */}
+        <div style={{
+          position: 'absolute', top: '20%', left: '30%',
+          width: 600, height: 600, borderRadius: '50%',
+          background: 'radial-gradient(circle, rgba(255,193,7,0.06) 0%, transparent 70%)',
+          pointerEvents: 'none',
+        }} />
+
+        {/* Top — logo */}
+        <div className="p-10 relative z-10">
           <img
-            src="/brand/abhicabs-logo-dark.svg"
-            alt="ABHI CABS — Ride With Trust"
-            style={{ height: 46 }}
+            src="/brand/abhi-cabs-logo-full.svg"
+            alt={`${APP_NAME} — Ride With Trust`}
+            style={{ height: 52 }}
           />
         </div>
 
-        <div>
-          <div className="w-12 h-1 rounded-full mb-6" style={{ backgroundColor: '#FFC107' }} />
-          <h2 className="text-4xl font-extrabold leading-tight text-white mb-4 tracking-tight" style={{ letterSpacing: '-1px' }}>
-            Run your entire fleet<br />from one dashboard.
-          </h2>
-          <p className="text-sm leading-relaxed max-w-xs font-medium" style={{ color: '#777' }}>
-            Dispatch, live tracking, driver management,
-            payments and reporting — all in one console
-            built for ABHI CABS.
-          </p>
-          <div className="flex gap-8 mt-10">
-            {[['Fleet', '300+'], ['Cities', '8'], ['Uptime', '99.9%']].map(([k, v]) => (
-              <div key={k}>
-                <p className="text-2xl font-extrabold" style={{ color: '#FFC107' }}>{v}</p>
-                <p className="text-xs mt-0.5 font-bold text-white tracking-widest uppercase">{k}</p>
-              </div>
-            ))}
+        {/* Centre — hero message */}
+        <div className="flex-1 flex items-center px-10 relative z-10">
+          <div style={{ maxWidth: 520 }}>
+            <p className="text-xs font-semibold tracking-widest uppercase mb-5"
+               style={{ color: '#FFC107', letterSpacing: '0.2em' }}>
+              Fleet Management Console
+            </p>
+            <h1 className="text-5xl font-extrabold leading-[1.1] tracking-tight text-white mb-5"
+                style={{ letterSpacing: '-1.5px' }}>
+              Everything your fleet needs. One&nbsp;dashboard.
+            </h1>
+            <p className="text-base leading-relaxed mb-10" style={{ color: '#888', maxWidth: 420 }}>
+              Dispatch, live tracking, driver management, payments and reporting — built for the way you operate.
+            </p>
+
+            {/* Stats row */}
+            <div className="flex gap-12">
+              {[
+                ['300+', 'Vehicles'],
+                ['8', 'Cities'],
+                ['24/7', 'Operations'],
+              ].map(([value, label]) => (
+                <div key={label}>
+                  <p className="text-3xl font-extrabold tracking-tight" style={{ color: '#FFC107' }}>{value}</p>
+                  <p className="text-xs mt-1 font-medium" style={{ color: '#666' }}>{label}</p>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
-        <p className="text-[11.5px] font-bold tracking-widest uppercase" style={{ color: '#444' }}>
-          © 2026 {APP_NAME} · Ride With Trust
-        </p>
+        {/* Bottom — footer */}
+        <div className="p-10 relative z-10">
+          <p className="text-xs" style={{ color: '#333' }}>
+            © 2026 {APP_NAME} · Ride With Trust
+          </p>
+        </div>
       </div>
 
-      {/* ── Login form ── */}
-      <div className="flex items-center justify-center p-6" style={{ backgroundColor: '#F9F9F7' }}>
-        <div className="w-full max-w-sm">
+      {/* ── Login form — spans 2 of 5 cols ── */}
+      <div className="col-span-2 flex items-center justify-center p-8">
+        <div className="w-full" style={{ maxWidth: 380 }}>
 
           {/* Mobile logo */}
-          <div className="flex items-center gap-2 mb-8 lg:hidden">
+          <div className="flex items-center gap-2 mb-10 lg:hidden">
             <img
-              src="/brand/abhicabs-logo.svg"
-              alt="ABHI CABS — Ride With Trust"
-              style={{ height: 34 }}
+              src="/brand/abhi-cabs-logo-new.svg"
+              alt={`${APP_NAME} — Ride With Trust`}
+              style={{ height: 44 }}
             />
           </div>
 
-          <h1 className="text-2xl font-extrabold mb-1 tracking-tight" style={{ color: '#111111', letterSpacing: '-0.5px' }}>
-            Admin sign in
-          </h1>
-          <p className="text-xs mb-7 font-medium" style={{ color: '#9A9A9A' }}>
-            Enter your credentials to access the ERP console.
-          </p>
+          {/* Welcome text */}
+          <div className="mb-8">
+            <h1 className="text-2xl font-extrabold tracking-tight mb-2"
+                style={{ color: '#111', letterSpacing: '-0.5px' }}>
+              Welcome back
+            </h1>
+            <p className="text-sm" style={{ color: '#999' }}>
+              Sign in to the {APP_NAME} admin console.
+            </p>
+          </div>
 
-          {submitError && <Alert type="error" className="mb-4">{submitError}</Alert>}
+          {submitError && <Alert type="error" className="mb-5">{submitError}</Alert>}
 
-          <div className="space-y-4">
+          <div className="space-y-5">
             <FormField label="Email address" htmlFor="email" required error={touched.email && errors.email}>
               <Input
                 id="email"
                 type="email"
                 autoComplete="username"
-                placeholder="admin@abhicabs.in"
+                placeholder="you@abhicabs.in"
                 value={values.email}
                 onChange={(e) => setValue('email', e.target.value)}
                 onBlur={() => setFieldTouched('email')}
@@ -116,7 +143,7 @@ export default function AdminLogin() {
             <div className="flex justify-end">
               <Link
                 to="/admin/forgot"
-                className="text-[12.5px] font-bold hover:underline focus-ring rounded"
+                className="text-xs font-semibold hover:underline focus-ring rounded"
                 style={{ color: '#b45309' }}
               >
                 Forgot password?
@@ -128,12 +155,23 @@ export default function AdminLogin() {
               className="w-full"
               loading={submitting}
               onClick={handleSubmit}
-              style={{ backgroundColor: '#FFC107', color: '#111111', fontWeight: 800 }}
+              style={{
+                backgroundColor: '#FFC107',
+                color: '#111',
+                fontWeight: 800,
+                fontSize: 15,
+                padding: '13px 0',
+                borderRadius: 12,
+              }}
             >
               Sign in
             </Button>
           </div>
 
+          {/* Security note */}
+          <p className="text-center mt-8 text-xs" style={{ color: '#CCC' }}>
+            Protected by 256-bit encryption
+          </p>
         </div>
       </div>
     </div>
