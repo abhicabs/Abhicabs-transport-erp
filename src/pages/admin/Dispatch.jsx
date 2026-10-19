@@ -403,11 +403,14 @@ export default function Dispatch() {
                       {/* ── Mode toggle ── */}
                       <div className="flex items-center gap-2 mb-1">
                         <button type="button" onClick={() => toggleManual(b.id)}
-                          className="flex items-center gap-1.5 text-xs font-semibold"
+                          className="flex items-center gap-1.5 text-xs font-bold"
                           style={{
-                            padding: '4px 10px', borderRadius: 8, border: '1px solid #E5E7EB', cursor: 'pointer',
-                            backgroundColor: manualMode[b.id] ? '#EFF6FF' : '#F9FAFB',
-                            color: manualMode[b.id] ? '#1D4ED8' : '#6B7280',
+                            padding: '6px 14px', borderRadius: 10, cursor: 'pointer',
+                            border: manualMode[b.id] ? '1.5px solid #3B82F6' : '1.5px solid #FFC107',
+                            backgroundColor: manualMode[b.id] ? '#EFF6FF' : '#FFFBEB',
+                            color: manualMode[b.id] ? '#1D4ED8' : '#92400E',
+                            boxShadow: manualMode[b.id] ? 'none' : '0 1px 4px rgba(255,193,7,0.25)',
+                            transition: 'all 0.15s ease',
                           }}>
                           {manualMode[b.id]
                             ? <><ChevronDown size={12} /> Select from fleet</>
