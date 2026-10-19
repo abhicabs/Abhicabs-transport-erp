@@ -52,7 +52,7 @@ export default function ForgotPassword() {
               Check your inbox and spam folder.
             </p>
             <p className="text-sm mb-6" style={{ color: '#9CA3AF' }}>
-              The link expires in 1 hour.
+              The link expires in 30 minutes.
             </p>
             <Link to="/admin/login"
               className="flex items-center gap-1.5 text-sm font-semibold hover:underline"
