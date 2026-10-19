@@ -90,7 +90,6 @@ export default function DataTable({
           </Table>
         </TableContainer>,
       )}
-
       {onPageChange && (
         <Pagination page={page} totalPages={totalPages} total={total} limit={limit} onChange={onPageChange} onLimitChange={onLimitChange} />
       )}

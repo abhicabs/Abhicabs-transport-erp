@@ -683,7 +683,6 @@ function PaymentLinksTab() {
     const f = manualForm;
     const errs = {};
     if (!f.amount || Number(f.amount) <= 0) errs.amount = 'Enter a valid amount';
-    if (!f.customerName.trim()) errs.customerName = 'Required';
     if (!f.customerPhone.trim()) errs.customerPhone = 'Required';
     if (f.customerPhone && !/^\+?\d{10,13}$/.test(f.customerPhone.replace(/\s/g, ''))) errs.customerPhone = 'Invalid phone';
     if (f.customerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.customerEmail)) errs.customerEmail = 'Invalid email';
@@ -692,21 +691,22 @@ function PaymentLinksTab() {
 
     setManualLoading(true);
     try {
-      const body = {
+      const res = await adminPaymentsService.createStandaloneLink({
         amount: Number(f.amount),
-        customerName: f.customerName.trim(),
         customerPhone: f.customerPhone.trim(),
-        description: f.description.trim() || `Payment — ${f.customerName.trim()}`,
-        sendSms: f.sendSms,
-        sendEmail: f.sendEmail,
-      };
-      if (f.customerEmail.trim()) body.customerEmail = f.customerEmail.trim();
-      if (f.expireByMinutes && Number(f.expireByMinutes) > 0) body.expireByMinutes = Number(f.expireByMinutes);
-
-      const res = await adminPaymentsService.createStandaloneLink(body);
+        customerName: f.customerName.trim() || undefined,
+        customerEmail: f.customerEmail.trim() || undefined,
+        description: f.description.trim() || undefined,
+        notifyBySms: f.sendSms,
+        notifyByEmail: f.sendEmail,
+        // Backend expects hours, not minutes
+        expiresInHours: (f.expireByMinutes && Number(f.expireByMinutes) > 0)
+          ? Math.max(1, Math.ceil(Number(f.expireByMinutes) / 60))
+          : undefined,
+      });
       const link = res?.data?.payment || res?.data?.link || res?.payment || res?.link || res?.data || res;
       setManualResult(link);
-      toast.success('Payment link created');
+      toast.success(res?.message || 'Payment link created');
     } catch (e) { toast.error(e.message || 'Failed to create payment link'); }
     finally { setManualLoading(false); }
   };
@@ -785,14 +785,14 @@ function PaymentLinksTab() {
                 <Button icon={Link2} loading={linkLoading} onClick={createLink}>Generate Payment Link</Button>
                 <Button icon={QrCode} variant="secondary" loading={qrLoading} onClick={createQR}>Generate QR Code</Button>
               </div>
-              {linkResult && (linkResult.shortUrl || linkResult.short_url) && (
+              {linkResult && (linkResult.shareUrl || linkResult.shortUrl || linkResult.short_url) && (
                 <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, backgroundColor: '#F0FDF4', border: '1.5px solid #BBF7D0' }}>
                   <p style={{ fontWeight: 700, fontSize: 13, color: '#15803D', marginBottom: 6 }}>✓ Payment Link {linkResult.reused ? '(existing)' : 'Created'}</p>
                   <div className="flex items-center gap-2">
-                    <a href={linkResult.shortUrl || linkResult.short_url} target="_blank" rel="noopener noreferrer"
-                      style={{ flex: 1, fontSize: 13, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>{linkResult.shortUrl || linkResult.short_url}</a>
-                    <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(linkResult.shortUrl || linkResult.short_url)} />
-                    <IconButton icon={ExternalLink} size="sm" label="Open" onClick={() => window.open(linkResult.shortUrl || linkResult.short_url, '_blank')} />
+                    <a href={linkResult.shareUrl || linkResult.shortUrl || linkResult.short_url} target="_blank" rel="noopener noreferrer"
+                      style={{ flex: 1, fontSize: 13, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>{linkResult.shareUrl || linkResult.shortUrl || linkResult.short_url}</a>
+                    <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(linkResult.shareUrl || linkResult.shortUrl || linkResult.short_url)} />
+                    <IconButton icon={ExternalLink} size="sm" label="Open" onClick={() => window.open(linkResult.shareUrl || linkResult.shortUrl || linkResult.short_url, '_blank')} />
                   </div>
                 </div>
               )}
@@ -805,10 +805,10 @@ function PaymentLinksTab() {
                         style={{ width: 200, height: 200, borderRadius: 10, border: '1px solid #E5E7EB' }} />
                     </div>
                   )}
-                  {(qrResult.shortUrl || qrResult.short_url) && (
+                  {(qrResult.shareUrl || qrResult.shortUrl || qrResult.short_url) && (
                     <div className="flex items-center gap-2 mt-2">
-                      <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>{(qrResult.shortUrl || qrResult.short_url).replace('https://', '')}</span>
-                      <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(qrResult.shortUrl || qrResult.short_url)} />
+                      <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>{(qrResult.shareUrl || qrResult.shortUrl || qrResult.short_url).replace('https://', '')}</span>
+                      <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(qrResult.shareUrl || qrResult.shortUrl || qrResult.short_url)} />
                     </div>
                   )}
                 </div>
@@ -839,7 +839,7 @@ function PaymentLinksTab() {
                     const isLive = ['CREATED', 'AUTHORISED', 'created'].includes(st);
                     const isCaptured = ['CAPTURED', 'paid'].includes(st);
                     const isCancelled = ['FAILED', 'REFUNDED', 'CANCELLED', 'cancelled', 'expired'].includes(st);
-                    const url = p.shortUrl || p.short_url || null;
+                    const url = p.shareUrl || p.shortUrl || p.short_url || null;
                     const method = p.method || p.purpose || '';
                     return (
                       <div key={p.id || p.providerOrderId} style={{
@@ -909,23 +909,23 @@ function PaymentLinksTab() {
                   </div>
                   <div className="flex items-center justify-between">
                     <span style={{ color: '#6B7280' }}>Customer</span>
-                    <span style={{ fontWeight: 600 }}>{manualResult.customerName || manualForm.customerName} · {manualResult.customerPhone || manualForm.customerPhone}</span>
+                    <span style={{ fontWeight: 600 }}>{manualResult.payerName || manualForm.customerName}{(manualResult.payerPhone || manualForm.customerPhone) ? ` · ${manualResult.payerPhone || manualForm.customerPhone}` : ''}</span>
                   </div>
-                  {(manualResult.shortUrl || manualResult.short_url) && (
+                  {(manualResult.shareUrl || manualResult.shortUrl || manualResult.short_url) && (
                     <div style={{ marginTop: 8, padding: '10px 12px', borderRadius: 10, backgroundColor: '#fff', border: '1px solid #E5E7EB' }}>
                       <p style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', marginBottom: 4 }}>Payment Link</p>
                       <div className="flex items-center gap-2">
-                        <a href={manualResult.shortUrl || manualResult.short_url} target="_blank" rel="noopener noreferrer"
+                        <a href={manualResult.shareUrl || manualResult.shortUrl || manualResult.short_url} target="_blank" rel="noopener noreferrer"
                           style={{ flex: 1, fontSize: 13, fontWeight: 600, color: '#3B65DB', wordBreak: 'break-all' }}>
-                          {manualResult.shortUrl || manualResult.short_url}
+                          {manualResult.shareUrl || manualResult.shortUrl || manualResult.short_url}
                         </a>
-                        <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(manualResult.shortUrl || manualResult.short_url)} />
-                        <IconButton icon={ExternalLink} size="sm" label="Open" onClick={() => window.open(manualResult.shortUrl || manualResult.short_url, '_blank')} />
+                        <IconButton icon={Copy} size="sm" label="Copy" onClick={() => copyLink(manualResult.shareUrl || manualResult.shortUrl || manualResult.short_url)} />
+                        <IconButton icon={ExternalLink} size="sm" label="Open" onClick={() => window.open(manualResult.shareUrl || manualResult.shortUrl || manualResult.short_url, '_blank')} />
                       </div>
                     </div>
                   )}
-                  {manualForm.sendSms && <p style={{ fontSize: 12, color: '#15803D', marginTop: 4 }}>📱 SMS sent to {manualResult.customerPhone || manualForm.customerPhone}</p>}
-                  {manualForm.sendEmail && manualForm.customerEmail && <p style={{ fontSize: 12, color: '#15803D' }}>✉️ Email sent to {manualForm.customerEmail}</p>}
+                  {manualForm.sendSms && <p style={{ fontSize: 12, color: '#15803D', marginTop: 4 }}>📱 SMS sent to {manualResult.payerPhone || manualForm.customerPhone}</p>}
+                  {manualForm.sendEmail && manualForm.customerEmail && <p style={{ fontSize: 12, color: '#15803D' }}>✉️ Email sent to {manualResult.payerEmail || manualForm.customerEmail}</p>}
                 </div>
               </div>
               <div className="flex gap-3 justify-end">
@@ -948,7 +948,7 @@ function PaymentLinksTab() {
                     <Input type="number" min="1" step="0.01" value={manualForm.amount}
                       onChange={(e) => setMF('amount', e.target.value)} placeholder="4250" />
                   </FormField>
-                  <FormField label="Customer name" required error={manualErrors.customerName}>
+                  <FormField label="Customer name" error={manualErrors.customerName}>
                     <Input value={manualForm.customerName}
                       onChange={(e) => setMF('customerName', e.target.value)} placeholder="Rajesh Kumar" />
                   </FormField>
@@ -956,7 +956,7 @@ function PaymentLinksTab() {
                 <div className="grid grid-cols-2 gap-3">
                   <FormField label="Phone" required error={manualErrors.customerPhone} hint="SMS is sent here">
                     <Input value={manualForm.customerPhone}
-                      onChange={(e) => setMF('customerPhone', e.target.value)} placeholder="+919876543210" />
+                      onChange={(e) => setMF('customerPhone', e.target.value)} placeholder="9876543210" />
                   </FormField>
                   <FormField label="Email (optional)" error={manualErrors.customerEmail}>
                     <Input type="email" value={manualForm.customerEmail}
@@ -968,9 +968,9 @@ function PaymentLinksTab() {
                     onChange={(e) => setMF('description', e.target.value)} placeholder="Balance payment for trip" />
                 </FormField>
                 <div className="grid grid-cols-2 gap-3">
-                  <FormField label="Auto-expire (minutes)" hint="Empty = no expiry">
-                    <Input type="number" min="1" value={manualForm.expireByMinutes}
-                      onChange={(e) => setMF('expireByMinutes', e.target.value)} placeholder="e.g. 1440 (24h)" />
+                  <FormField label="Auto-expire (hours)" hint="Empty = 24h default">
+                    <Input type="number" min="1" max="720" value={manualForm.expireByMinutes}
+                      onChange={(e) => setMF('expireByMinutes', e.target.value)} placeholder="e.g. 24" />
                   </FormField>
                   <div className="space-y-2" style={{ paddingTop: 22 }}>
                     <Switch checked={manualForm.sendSms} onChange={(v) => setMF('sendSms', v)} label="Send SMS" />

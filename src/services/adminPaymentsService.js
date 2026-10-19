@@ -349,10 +349,96 @@ export const adminPaymentsService = {
     return apiClient.post(`/admin/payments/${paymentId}/resend`, { medium });
   },
 
-  // ---- Standalone Payment Link (no booking) -------------------------------
+  // ---- Standalone Payment Links & QR (no booking) -------------------------
 
-  /** Create a manual payment link — no booking required. */
-  async createStandaloneLink(body) {
-    return apiClient.post('/admin/payments/link', body);
+  /**
+   * POST /admin/payments/links — create a standalone payment link.
+   *
+   * The backend's createStandaloneLinkSchema expects:
+   *   amount (required), customerPhone (required),
+   *   customerName?, customerEmail?, description?,
+   *   expiresInHours?, expiresAt?, notifyBySms?, notifyByEmail?, sendWhatsApp?
+   *
+   * This method maps the UI-friendly field names to the backend contract so
+   * callers do not need to know the schema.
+   */
+  async createStandaloneLink({
+    amount,
+    customerPhone,
+    customerName,
+    customerEmail,
+    description,
+    expiresInHours,
+    sendWhatsApp,
+    // Legacy UI field names — mapped to backend equivalents
+    notifyBySms,
+    notifyByEmail,
+    sendSms,
+    sendEmail,
+  } = {}) {
+    const body = { amount, customerPhone };
+    if (customerName)  body.customerName  = customerName;
+    if (customerEmail) body.customerEmail = customerEmail;
+    if (description)   body.description   = description;
+    if (expiresInHours != null) body.expiresInHours = expiresInHours;
+    // Accept both field naming conventions
+    if (notifyBySms  != null) body.notifyBySms  = notifyBySms;
+    else if (sendSms != null) body.notifyBySms  = sendSms;
+    if (notifyByEmail  != null) body.notifyByEmail  = notifyByEmail;
+    else if (sendEmail != null) body.notifyByEmail  = sendEmail;
+    if (sendWhatsApp != null) body.sendWhatsApp = sendWhatsApp;
+    return apiClient.post('/admin/payments/links', body);
+  },
+
+  /**
+   * POST /admin/payments/qr — create a standalone UPI QR (no booking).
+   *
+   * Same payer fields as a standalone link. No SMS/email delivery — QR is an
+   * image the admin shares themselves.
+   */
+  async createStandaloneQr({
+    amount,
+    customerPhone,
+    customerName,
+    customerEmail,
+    description,
+    expiresInHours,
+    sendWhatsApp,
+  } = {}) {
+    const body = { amount, customerPhone };
+    if (customerName)  body.customerName  = customerName;
+    if (customerEmail) body.customerEmail = customerEmail;
+    if (description)   body.description   = description;
+    if (expiresInHours != null) body.expiresInHours = expiresInHours;
+    if (sendWhatsApp != null) body.sendWhatsApp = sendWhatsApp;
+    return apiClient.post('/admin/payments/qr', body);
+  },
+
+  /**
+   * POST /admin/payments/:id/whatsapp — share a payment link on WhatsApp.
+   *
+   * Always returns { whatsappUrl }, even when `sent` is false (bot down or
+   * not configured). The admin can tap the URL to send from their own device.
+   *
+   * @param {string} paymentId
+   * @param {Object}  opts
+   * @param {string} [opts.phone]  Override the stored payer phone for this share only.
+   * @param {boolean} [opts.send]  Attempt a real send through the WhatsApp bot.
+   */
+  async shareOnWhatsApp(paymentId, { phone, send } = {}) {
+    const body = {};
+    if (phone != null) body.phone = phone;
+    if (send  != null) body.send  = send;
+    return apiClient.post(`/admin/payments/${paymentId}/whatsapp`, body);
+  },
+
+  /**
+   * GET /admin/payments/collections — paginated list of all collection
+   * instruments (links + QRs), with optional filters.
+   *
+   * scope: 'all' | 'standalone' | 'booking'
+   */
+  async listStandaloneCollections(params = {}) {
+    return apiClient.get('/admin/payments/collections', { params });
   },
 };
