@@ -39,67 +39,189 @@ const METHOD_ICON = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Payments tab — the original page, unchanged
+// Payments tab — full history with expandable details, UTR, purpose
 // ─────────────────────────────────────────────────────────────────────────────
+
+const PURPOSE_LABELS = {
+  ADVANCE: 'Advance', BALANCE: 'Balance', FULL: 'Full Payment',
+  REFUND: 'Refund', CANCELLATION_FEE: 'Cancellation Fee',
+  STANDALONE: 'Standalone', EXTRA_CHARGE: 'Extra Charge',
+};
+const PURPOSE_TONES = {
+  ADVANCE: '#3B65DB', BALANCE: '#D97706', FULL: '#15803D',
+  REFUND: '#DC2626', CANCELLATION_FEE: '#DC2626', STANDALONE: '#6B7280',
+};
+
+function extractUTR(raw) {
+  if (!raw) return null;
+  const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  // Razorpay nests acquirer_data.utr or bank_transaction_id
+  const acq = r?.payload?.payment?.entity?.acquirer_data || r?.acquirer_data || {};
+  return acq.utr || acq.bank_transaction_id || acq.rrn || r?.utr || r?.bank_transaction_id || null;
+}
+
+function extractBankRef(raw) {
+  if (!raw) return null;
+  const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const entity = r?.payload?.payment?.entity || r || {};
+  return entity.bank || entity.wallet || entity.vpa || null;
+}
+
+function PaymentDetailRow({ label, value, mono }) {
+  if (!value) return null;
+  return (
+    <div className="flex items-start gap-2 py-1.5" style={{ borderBottom: '1px solid #F3F4F6' }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: '#6B7280', minWidth: 130, flexShrink: 0 }}>{label}</span>
+      <span style={{ fontSize: 13, color: '#1F2937', fontWeight: 500, fontFamily: mono ? 'monospace' : 'inherit', wordBreak: 'break-all' }}>{value}</span>
+    </div>
+  );
+}
+
 function PaymentsTab() {
+  const [expanded, setExpanded] = useState(null);
   const list = useResourceList(adminPaymentsService, {
-    filterDefaults: { status: '', method: '', from: '', to: '' },
+    filterDefaults: { status: '', method: '', purpose: '', from: '', to: '' },
     sortBy: 'createdAt',
     sortDir: 'desc',
-    limit: 10,
+    limit: 15,
   });
   const dates = dateFilterProps(list);
 
   const columns = [
     {
-      key: 'booking', header: 'Booking',
-      render: (r) => (
-        <div>
-          <p className="font-mono text-xs" style={{ color: '#6B7280' }}>{r.booking?.bookingNumber || r.bookingId}</p>
-          <p style={{ fontWeight: 600, color: '#1F2937', fontSize: 13 }}>{r.booking?.customer?.user?.name || '—'}</p>
-          <p style={{ fontSize: 12.5, color: '#9CA3AF' }}>{r.booking?.customer?.user?.phone || ''}</p>
-        </div>
-      ),
+      key: 'booking', header: 'Booking / Customer',
+      render: (r) => {
+        const name = r.payerName || r.booking?.customer?.user?.name || '—';
+        const phone = r.payerPhone || r.booking?.customer?.user?.phone || '';
+        return (
+          <div>
+            <p className="font-mono text-xs" style={{ color: '#6B7280' }}>{r.booking?.bookingNumber || (r.bookingId ? r.bookingId.slice(0, 8) + '…' : 'Standalone')}</p>
+            <p style={{ fontWeight: 600, color: '#1F2937', fontSize: 13 }}>{name}</p>
+            {phone && <p style={{ fontSize: 12, color: '#9CA3AF' }}>{phone}</p>}
+          </div>
+        );
+      },
     },
     {
       key: 'amount', header: 'Amount', sortable: true,
-      render: (r) => <span style={{ fontWeight: 700, color: '#1F2937' }}>{formatCurrency(r.amount)}</span>,
+      render: (r) => (
+        <div>
+          <span style={{ fontWeight: 700, color: '#1F2937', fontSize: 15 }}>{formatCurrency(r.amount)}</span>
+          <p style={{ fontSize: 11, color: PURPOSE_TONES[r.purpose] || '#6B7280', fontWeight: 700, marginTop: 2 }}>
+            {PURPOSE_LABELS[r.purpose] || titleCase(r.purpose || '—')}
+          </p>
+        </div>
+      ),
     },
     {
       key: 'method', header: 'Method',
       render: (r) => {
         const Icon = METHOD_ICON[r.method] || CreditCard;
+        const utr = extractUTR(r.rawResponse);
         return (
-          <span className="flex items-center gap-1.5" style={{ fontSize: 13 }}>
-            <Icon size={13} style={{ color: '#6B7280' }} />{titleCase(r.method || '—')}
-          </span>
+          <div>
+            <span className="flex items-center gap-1.5" style={{ fontSize: 13 }}>
+              <Icon size={13} style={{ color: '#6B7280' }} />{titleCase(r.method || '—')}
+            </span>
+            {r.collectionType && (
+              <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>
+                via {r.collectionType === 'LINK' ? 'Payment Link' : r.collectionType === 'QR' ? 'QR Code' : 'Checkout'}
+              </p>
+            )}
+            {utr && <p className="font-mono" style={{ fontSize: 11, color: '#3B65DB', marginTop: 2 }}>UTR: {utr}</p>}
+          </div>
         );
       },
-    },
-    {
-      key: 'purpose', header: 'Purpose',
-      render: (r) => <span style={{ color: '#6B7280', fontSize: 13 }}>{titleCase(r.purpose || '—')}</span>,
     },
     {
       key: 'status', header: 'Status',
       render: (r) => <StatusBadge status={r.status} />,
     },
     {
-      key: 'paidAt', header: 'Paid At', sortable: true,
-      render: (r) => r.paidAt ? formatDateTime(r.paidAt) : <span style={{ color: '#9CA3AF' }}>—</span>,
+      key: 'paidAt', header: 'Date', sortable: true,
+      render: (r) => (
+        <div>
+          {r.paidAt ? (
+            <p style={{ fontSize: 13, color: '#1F2937', fontWeight: 500 }}>{formatDateTime(r.paidAt)}</p>
+          ) : (
+            <p style={{ fontSize: 13, color: '#9CA3AF' }}>Pending</p>
+          )}
+          <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>Created {formatDateTime(r.createdAt)}</p>
+        </div>
+      ),
     },
     {
-      key: 'failureReason', header: 'Notes',
-      render: (r) => r.failureReason
-        ? <span style={{ color: '#EF4444', fontSize: 13.5 }}>{r.failureReason}</span>
-        : <span style={{ color: '#9CA3AF' }}>—</span>,
+      key: 'actions', header: '',
+      render: (r) => (
+        <button onClick={() => setExpanded(expanded === r.id ? null : r.id)}
+          style={{ fontSize: 12, fontWeight: 600, color: '#3B65DB', background: 'none', border: 'none', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+          {expanded === r.id ? '▲ Less' : '▼ More'}
+        </button>
+      ),
     },
   ];
+
+  const renderExpandedRow = (r) => {
+    if (expanded !== r.id) return null;
+    const utr = extractUTR(r.rawResponse);
+    const bankRef = extractBankRef(r.rawResponse);
+    return (
+      <tr key={`${r.id}-detail`}>
+        <td colSpan={columns.length} style={{ padding: '0 16px 16px', background: '#FAFBFC' }}>
+          <div style={{ padding: '16px 20px', borderRadius: 14, border: '1.5px solid #E8E8E4', background: '#fff' }}>
+            <p style={{ fontWeight: 700, fontSize: 14, color: '#1F2937', marginBottom: 12 }}>Payment Details</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8">
+              <div>
+                <PaymentDetailRow label="Payment ID" value={r.providerPaymentId} mono />
+                <PaymentDetailRow label="Order ID" value={r.providerOrderId} mono />
+                <PaymentDetailRow label="UTR / Bank Ref" value={utr} mono />
+                <PaymentDetailRow label="Bank / VPA" value={bankRef} mono />
+                <PaymentDetailRow label="Provider" value={titleCase(r.provider || '—')} />
+                <PaymentDetailRow label="Method" value={titleCase(r.method || '—')} />
+                <PaymentDetailRow label="Collection Type" value={r.collectionType === 'LINK' ? 'Payment Link' : r.collectionType === 'QR' ? 'QR Code' : r.collectionType || 'Checkout'} />
+              </div>
+              <div>
+                <PaymentDetailRow label="Purpose" value={PURPOSE_LABELS[r.purpose] || titleCase(r.purpose || '—')} />
+                <PaymentDetailRow label="Amount" value={formatCurrency(r.amount)} />
+                <PaymentDetailRow label="Status" value={titleCase(r.status || '—')} />
+                <PaymentDetailRow label="Description" value={r.description} />
+                <PaymentDetailRow label="Paid At" value={r.paidAt ? formatDateTime(r.paidAt) : '—'} />
+                <PaymentDetailRow label="Created" value={formatDateTime(r.createdAt)} />
+                {r.shareUrl && <PaymentDetailRow label="Share URL" value={r.shareUrl} />}
+                {r.failureReason && <PaymentDetailRow label="Failure" value={r.failureReason} />}
+              </div>
+            </div>
+            {r.booking && (
+              <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: '#F9FAFB', border: '1px solid #F3F4F6' }}>
+                <p style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', marginBottom: 4 }}>Booking</p>
+                <p style={{ fontSize: 13, fontWeight: 600, color: '#1F2937' }}>
+                  {r.booking.bookingNumber} · {r.booking.customer?.user?.name || '—'} · {r.booking.customer?.user?.phone || '—'}
+                </p>
+                {(r.booking.pickupAddress || r.booking.dropAddress) && (
+                  <p style={{ fontSize: 12, color: '#6B7280', marginTop: 2 }}>
+                    {r.booking.pickupAddress || ''} → {r.booking.dropAddress || ''}
+                  </p>
+                )}
+              </div>
+            )}
+            {!r.booking && r.payerName && (
+              <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 10, background: '#F9FAFB', border: '1px solid #F3F4F6' }}>
+                <p style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', marginBottom: 4 }}>Payer (Standalone)</p>
+                <p style={{ fontSize: 13, fontWeight: 600, color: '#1F2937' }}>
+                  {r.payerName}{r.payerPhone ? ` · ${r.payerPhone}` : ''}{r.payerEmail ? ` · ${r.payerEmail}` : ''}
+                </p>
+              </div>
+            )}
+          </div>
+        </td>
+      </tr>
+    );
+  };
 
   return (
     <>
       <FilterBar
-        searchPlaceholder="Search not supported on this endpoint"
+        searchPlaceholder="Search by booking number"
         filters={[
           {
             name: 'status',
@@ -116,6 +238,13 @@ function PaymentsTab() {
             options: PAYMENT_METHODS.map((m) => ({ value: m, label: m })),
           },
           {
+            name: 'purpose',
+            value: list.filters.purpose || '',
+            onChange: (v) => list.setFilter('purpose', v),
+            placeholder: 'All purposes',
+            options: Object.entries(PURPOSE_LABELS).map(([k, v]) => ({ value: k, label: v })),
+          },
+          {
             name: 'sortBy',
             value: list.sortBy,
             onChange: (v) => list.onSort(v, list.sortDir),
@@ -125,12 +254,12 @@ function PaymentsTab() {
         ]}
         extra={
           <div className="flex items-center gap-2">
-            <label style={{ fontSize: 12, fontWeight: 600, color: '#6B7280', whiteSpace: 'nowrap' }} title="Filters by payment date">From</label>
-            <Input type="date" title="Filters by payment date" value={dates.fromValue} max={dates.toValue || undefined}
+            <label style={{ fontSize: 12, fontWeight: 600, color: '#6B7280', whiteSpace: 'nowrap' }}>From</label>
+            <Input type="date" value={dates.fromValue} max={dates.toValue || undefined}
               onChange={(e) => dates.onFromChange(e.target.value)}
               style={{ fontSize: 12, padding: '5px 8px' }} />
             <label style={{ fontSize: 12, fontWeight: 600, color: '#6B7280' }}>To</label>
-            <Input type="date" title="Filters by payment date" value={dates.toValue} min={dates.fromValue || undefined}
+            <Input type="date" value={dates.toValue} min={dates.fromValue || undefined}
               onChange={(e) => dates.onToChange(e.target.value)}
               style={{ fontSize: 12, padding: '5px 8px' }} />
           </div>
@@ -154,6 +283,7 @@ function PaymentsTab() {
         onLimitChange={list.setLimit}
         emptyTitle="No payments found"
         emptyDescription="Try adjusting your filters or date range."
+        renderExpandedRow={renderExpandedRow}
       />
     </>
   );
