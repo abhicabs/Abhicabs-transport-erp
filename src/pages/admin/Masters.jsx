@@ -1393,10 +1393,25 @@ function SurgeAreaForm({ open, onClose, initial, onSubmit }) {
           </FormField>
         )}
 
-        {/* Custom name */}
+        {/* Custom name — with auto-suggest from backend */}
         {(mode === 'custom' || isEdit) && (
-          <FormField label="Area name" required error={errors.name}>
-            <Input value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="e.g. Whitefield Tech Park" disabled={isEdit} />
+          <FormField label="Area name" required error={errors.name}
+            hint={!isEdit ? 'Type a place name and press Tab to auto-fill coordinates' : undefined}>
+            <Input value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="e.g. Whitefield Tech Park" disabled={isEdit}
+              onBlur={async () => {
+                if (isEdit || !form.name.trim() || form.centreLat) return;
+                try {
+                  const res = await surgeService.suggestArea(form.name.trim());
+                  if (res?.centreLat) {
+                    setForm((f) => ({
+                      ...f,
+                      centreLat: String(res.centreLat),
+                      centreLng: String(res.centreLng),
+                      ...(res.radiusKm ? { radiusKm: String(res.radiusKm) } : {}),
+                    }));
+                  }
+                } catch { /* suggestion is optional — don't break the form */ }
+              }} />
           </FormField>
         )}
 
@@ -1493,11 +1508,233 @@ function SurgePricingTab() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Route Surge Tab — corridor-based surge premiums
+// ─────────────────────────────────────────────────────────────────────────────
+function RouteSurgeTab() {
+  const toast = useToast();
+  const [routes, setRoutes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [search, setSearch] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await surgeService.listRoutes({ includeInactive: true });
+      setRoutes(res.routes || res || []);
+    } catch (e) { toast.error(e.message || 'Failed to load route surges'); }
+    finally { setLoading(false); }
+  }, [toast]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const EMPTY_ROUTE = {
+    name: '', pct: '', originLat: '', originLng: '', originRadiusKm: '30',
+    originLabel: '', destLat: '', destLng: '', destRadiusKm: '30', destLabel: '',
+    bidirectional: true, startsAt: '', endsAt: '', note: '',
+  };
+
+  const [form, setForm] = useState(EMPTY_ROUTE);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (formOpen && editing) {
+      setForm({
+        name: editing.name || '',
+        pct: String(editing.pct ?? ''),
+        originLat: String(editing.originLat ?? ''),
+        originLng: String(editing.originLng ?? ''),
+        originRadiusKm: String(editing.originRadiusKm ?? 30),
+        originLabel: editing.originLabel || '',
+        destLat: String(editing.destLat ?? ''),
+        destLng: String(editing.destLng ?? ''),
+        destRadiusKm: String(editing.destRadiusKm ?? 30),
+        destLabel: editing.destLabel || '',
+        bidirectional: editing.bidirectional ?? true,
+        startsAt: editing.startsAt ? new Date(editing.startsAt).toISOString().slice(0, 16) : '',
+        endsAt: editing.endsAt ? new Date(editing.endsAt).toISOString().slice(0, 16) : '',
+        note: editing.note || '',
+      });
+    } else if (formOpen) {
+      setForm(EMPTY_ROUTE);
+    }
+  }, [formOpen, editing]);
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const handleSubmit = async () => {
+    if (!form.name.trim()) { toast.error('Name is required'); return; }
+    if (!form.pct || Number(form.pct) <= 0) { toast.error('Surge percentage is required'); return; }
+    if (!form.originLat || !form.originLng) { toast.error('Origin coordinates are required'); return; }
+    if (!form.destLat || !form.destLng) { toast.error('Destination coordinates are required'); return; }
+    setSaving(true);
+    try {
+      const body = {
+        name: form.name.trim(),
+        pct: Number(form.pct),
+        originLat: Number(form.originLat),
+        originLng: Number(form.originLng),
+        originRadiusKm: Number(form.originRadiusKm) || 30,
+        destLat: Number(form.destLat),
+        destLng: Number(form.destLng),
+        destRadiusKm: Number(form.destRadiusKm) || 30,
+        bidirectional: form.bidirectional,
+        ...(form.originLabel && { originLabel: form.originLabel.trim() }),
+        ...(form.destLabel && { destLabel: form.destLabel.trim() }),
+        ...(form.startsAt && { startsAt: new Date(form.startsAt).toISOString() }),
+        ...(form.endsAt && { endsAt: new Date(form.endsAt).toISOString() }),
+        ...(form.note && { note: form.note.trim() }),
+      };
+      if (editing) {
+        await surgeService.updateRoute(editing.id, body);
+        toast.success('Route surge updated');
+      } else {
+        await surgeService.createRoute(body);
+        toast.success('Route surge created');
+      }
+      setFormOpen(false); setEditing(null); load();
+    } catch (e) { toast.error(e.message || 'Save failed'); }
+    finally { setSaving(false); }
+  };
+
+  const handleDeactivate = async (route) => {
+    if (!confirm(`Retire "${route.name}"? It can be reactivated later.`)) return;
+    try { await surgeService.deactivateRoute(route.id); toast.success(`${route.name} retired`); load(); }
+    catch (e) { toast.error(e.message || 'Failed'); }
+  };
+
+  const handleReactivate = async (route) => {
+    try { await surgeService.updateRoute(route.id, { isActive: true }); toast.success(`${route.name} reactivated`); load(); }
+    catch (e) { toast.error(e.message || 'Failed'); }
+  };
+
+  const q = search.toLowerCase();
+  const filtered = routes.filter((r) => !q || r.name?.toLowerCase().includes(q) || r.originLabel?.toLowerCase().includes(q) || r.destLabel?.toLowerCase().includes(q));
+
+  if (loading) return <LoadingState label="Loading route surges…" />;
+
+  return (
+    <div className="space-y-4">
+      <Alert type="info">
+        Route-based surge adds a percentage on top of the base fare for specific corridors
+        (e.g. airport runs, festival routes). It stacks with area-based surge and is capped by each
+        rate card's maxSurge. Time windows let you schedule seasonal premiums in advance.
+      </Alert>
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-bold uppercase tracking-widest" style={{ color: '#6B7280' }}>
+          Corridor Surges ({routes.length})
+        </p>
+        <div className="flex gap-2 items-center">
+          <SearchInput value={search} onChange={setSearch} placeholder="Search routes…" style={{ maxWidth: 200 }} />
+          <Button size="sm" icon={Plus} onClick={() => { setEditing(null); setFormOpen(true); }}>Add Route Surge</Button>
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div style={{ padding: '36px 16px', textAlign: 'center', borderRadius: 14, border: '1.5px dashed #E8E8E4', backgroundColor: '#FAFAFA' }}>
+          <Zap size={28} className="mx-auto mb-2" style={{ color: '#D1D5DB' }} />
+          <p style={{ fontWeight: 700, fontSize: 13.5, color: '#6B7280' }}>
+            {search ? 'No routes match' : 'No route surges yet'}
+          </p>
+          <p style={{ fontSize: 12, color: '#9CA3AF', marginTop: 4 }}>
+            Add a corridor surge for airport runs, festival routes, or high-demand corridors.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">{filtered.map((route) => {
+          const now = new Date();
+          const started = !route.startsAt || new Date(route.startsAt) <= now;
+          const ended = route.endsAt && new Date(route.endsAt) < now;
+          const active = route.isActive && started && !ended;
+          return (
+            <div key={route.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderRadius: 12, border: '1.5px solid #E8E8E4', backgroundColor: '#fff', opacity: route.isActive ? 1 : 0.5 }}>
+              <span style={{ fontSize: 18 }}>🛣️</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ fontWeight: 700, fontSize: 13.5, color: '#111' }}>
+                  {route.name}
+                  <Badge tone={active ? 'green' : ended ? 'slate' : 'amber'} className="ml-2">
+                    {!route.isActive ? 'Retired' : ended ? 'Expired' : !started ? 'Scheduled' : `+${Number(route.pct)}%`}
+                  </Badge>
+                  {route.bidirectional && <Badge tone="blue" className="ml-1">↔ Both ways</Badge>}
+                </p>
+                <p style={{ fontSize: 11.5, color: '#6B7280', marginTop: 1 }}>
+                  {route.originLabel || `${Number(route.originLat).toFixed(2)},${Number(route.originLng).toFixed(2)}`}
+                  {' → '}
+                  {route.destLabel || `${Number(route.destLat).toFixed(2)},${Number(route.destLng).toFixed(2)}`}
+                  {' · '}{route.originRadiusKm || 30}km / {route.destRadiusKm || 30}km radius
+                  {route.startsAt && <span> · From {new Date(route.startsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
+                  {route.endsAt && <span> to {new Date(route.endsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
+                <IconButton icon={Pencil} size="sm" label="Edit" onClick={() => { setEditing(route); setFormOpen(true); }} />
+                {route.isActive
+                  ? <IconButton icon={Trash2} size="sm" label="Retire" variant="danger" onClick={() => handleDeactivate(route)} />
+                  : <IconButton icon={ToggleRight} size="sm" label="Reactivate" onClick={() => handleReactivate(route)} />}
+              </div>
+            </div>
+          );
+        })}</div>
+      )}
+
+      {/* Route Surge Form Modal */}
+      <Modal open={formOpen} onClose={() => { setFormOpen(false); setEditing(null); }}
+        title={editing ? 'Edit Route Surge' : 'Add Route Surge'}
+        footer={<><Button variant="secondary" onClick={() => { setFormOpen(false); setEditing(null); }}>Cancel</Button>
+          <Button icon={Save} loading={saving} onClick={handleSubmit}>{editing ? 'Update' : 'Create'}</Button></>}>
+        <div className="space-y-3">
+          <FormField label="Name" required>
+            <Input value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="e.g. Airport Premium, Dussehra Festival" />
+          </FormField>
+          <FormField label="Surge Percentage" required hint="Added on top of the base fare (0–100%)">
+            <Input type="number" min="0" max="100" step="1" value={form.pct} onChange={(e) => set('pct', e.target.value)} placeholder="e.g. 15" />
+          </FormField>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <p className="text-xs font-bold mb-1.5" style={{ color: '#374151' }}>Origin</p>
+              <FormField label="Label (optional)"><Input value={form.originLabel} onChange={(e) => set('originLabel', e.target.value)} placeholder="e.g. Bengaluru Airport" /></FormField>
+              <div className="grid grid-cols-2 gap-2 mt-1.5">
+                <FormField label="Latitude"><Input type="number" step="any" value={form.originLat} onChange={(e) => set('originLat', e.target.value)} placeholder="12.9716" /></FormField>
+                <FormField label="Longitude"><Input type="number" step="any" value={form.originLng} onChange={(e) => set('originLng', e.target.value)} placeholder="77.5946" /></FormField>
+              </div>
+              <FormField label="Radius (km)"><Input type="number" min="1" max="200" value={form.originRadiusKm} onChange={(e) => set('originRadiusKm', e.target.value)} /></FormField>
+            </div>
+            <div>
+              <p className="text-xs font-bold mb-1.5" style={{ color: '#374151' }}>Destination</p>
+              <FormField label="Label (optional)"><Input value={form.destLabel} onChange={(e) => set('destLabel', e.target.value)} placeholder="e.g. Mysuru City" /></FormField>
+              <div className="grid grid-cols-2 gap-2 mt-1.5">
+                <FormField label="Latitude"><Input type="number" step="any" value={form.destLat} onChange={(e) => set('destLat', e.target.value)} placeholder="12.2958" /></FormField>
+                <FormField label="Longitude"><Input type="number" step="any" value={form.destLng} onChange={(e) => set('destLng', e.target.value)} placeholder="76.6394" /></FormField>
+              </div>
+              <FormField label="Radius (km)"><Input type="number" min="1" max="200" value={form.destRadiusKm} onChange={(e) => set('destRadiusKm', e.target.value)} /></FormField>
+            </div>
+          </div>
+          <Checkbox checked={form.bidirectional} onChange={(v) => set('bidirectional', v)} label="Bidirectional — applies in both directions" />
+          <div className="grid grid-cols-2 gap-3">
+            <FormField label="Active From (optional)" hint="Leave blank to start immediately">
+              <Input type="datetime-local" value={form.startsAt} onChange={(e) => set('startsAt', e.target.value)} />
+            </FormField>
+            <FormField label="Active Until (optional)" hint="Leave blank for no end date">
+              <Input type="datetime-local" value={form.endsAt} onChange={(e) => set('endsAt', e.target.value)} />
+            </FormField>
+          </div>
+          <FormField label="Note (optional)">
+            <Textarea value={form.note} onChange={(e) => set('note', e.target.value)} placeholder="Why this route surge exists" rows={2} />
+          </FormField>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 export default function Masters() {
   const [tab, setTab] = useState('rates');
   const TABS = [
     { key: 'rates', label: 'Rate Cards', icon: Database },
     { key: 'surge', label: 'Surge Pricing', icon: Zap },
+    { key: 'routes', label: 'Route Surges', icon: MapPin },
     { key: 'states', label: 'Service States', icon: Globe },
   ];
   return (
@@ -1506,6 +1743,7 @@ export default function Masters() {
       <PageTabs tabs={TABS} value={tab} onChange={setTab} />
       {tab === 'rates' && <VehicleRatesTab />}
       {tab === 'surge' && <SurgePricingTab />}
+      {tab === 'routes' && <RouteSurgeTab />}
       {tab === 'states' && <ServiceStatesTab />}
     </div>
   );

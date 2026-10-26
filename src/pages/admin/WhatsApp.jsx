@@ -24,6 +24,7 @@ import Button  from '../../components/ui/Button';
 import Alert   from '../../components/ui/Alert';
 import { useAdminRealtimeContext } from '../../context/AdminRealtimeContext';
 import { useToast } from '../../hooks/useToast';
+import { apiClient } from '../../services/apiClient';
 
 // ── Brand colours ─────────────────────────────────────────────────────────
 const WA = {
@@ -442,23 +443,17 @@ export default function WhatsApp() {
     setContacts((prev) => prev.map((c) => c.id === id ? { ...c, unread: 0 } : c));
   };
 
-  const handleSend = (contactId, text) => {
-    // HONEST STATE: there is no backend WhatsApp-send endpoint yet
-    // (confirmed: no /admin/whatsapp/send route exists on the backend —
-    // only an MSG91 OTP-SMS stub that itself throws "not implemented yet,
-    // awaiting DLT approval"). Per the no-fake-success requirement, this no
-    // longer pretends to send or simulates a delivery tick on a timer.
-    // It stores the draft locally, tagged 'not_configured', and is fully
-    // wired to go live the moment a real endpoint exists:
-    //   await apiClient.post('/admin/whatsapp/send', { phone: contact.phone, message: text });
-    //   → set status from the real response instead of 'not_configured'.
+  const handleSend = async (contactId, text) => {
+    const contact = contacts.find((c) => c.id === contactId);
     const newMsg = {
       id:     `msg-${Date.now()}`,
       from:   'out',
       text,
       at:     new Date().toISOString(),
-      status: 'not_configured',
+      status: 'sending',
     };
+
+    // Optimistic update — show the message immediately
     setContacts((prev) =>
       prev.map((c) =>
         c.id === contactId
@@ -466,7 +461,39 @@ export default function WhatsApp() {
           : c
       )
     );
-    toast.error('Not sent — WhatsApp integration is not configured. This message was only saved locally.');
+
+    // Try the real backend endpoint
+    try {
+      const res = await apiClient.post('/admin/whatsapp/send', {
+        phone: contact?.phone,
+        message: text,
+      });
+      // Update status based on response
+      const finalStatus = res?.sent ? 'sent' : 'queued';
+      setContacts((prev) =>
+        prev.map((c) =>
+          c.id === contactId
+            ? { ...c, messages: c.messages.map((m) => m.id === newMsg.id ? { ...m, status: finalStatus } : m) }
+            : c
+        )
+      );
+      if (res?.sent) toast.success('Message sent via WhatsApp');
+      else toast.success('Message queued — will be sent when WhatsApp bot is online');
+    } catch (e) {
+      // Backend endpoint doesn't exist or WhatsApp not configured
+      setContacts((prev) =>
+        prev.map((c) =>
+          c.id === contactId
+            ? { ...c, messages: c.messages.map((m) => m.id === newMsg.id ? { ...m, status: 'not_configured' } : m) }
+            : c
+        )
+      );
+      if (e.status === 404 || e.code === 'ENDPOINT_NOT_IMPLEMENTED') {
+        toast.error('WhatsApp send endpoint not deployed yet — message saved locally only.');
+      } else {
+        toast.error(e.message || 'Could not send — message saved locally.');
+      }
+    }
   };
 
   const totalUnread = contacts.reduce((s, c) => s + c.unread, 0);

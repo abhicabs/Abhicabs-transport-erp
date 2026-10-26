@@ -271,17 +271,23 @@ export const adminPaymentsService = {
   },
 
   /**
-   * Recording a refund needs POST /admin/payments/refunds, which does NOT exist
-   * on the backend yet. We refuse loudly rather than 404 silently, and never
-   * fake a finance record locally. Re-point this at apiClient.post once the
-   * backend route lands.
+   * POST /admin/payments/refunds — issue a refund against a booking.
+   *
+   * Required: bookingId, amount, reason.
+   * Optional: method ('ORIGINAL' to refund via the original payment method,
+   *           'MANUAL' for offline/cash refunds). Defaults to 'ORIGINAL'.
+   *
+   * The backend caps the amount at (totalCaptured - alreadyRefunded) and
+   * returns 400 EXCEEDS_REFUNDABLE if the amount is too high.
    */
-  async createRefund(_payload) {
-    throw new Error(
-      'Refund recording is not available yet — the backend route ' +
-      'POST /admin/payments/refunds has not been built. You can still view the ' +
-      'refundable balance and past refunds here.'
-    );
+  async createRefund({ bookingId, amount, reason, method = 'ORIGINAL' }) {
+    const res = await apiClient.post('/admin/payments/refunds', {
+      bookingId,
+      amount: Number(amount),
+      reason,
+      method,
+    });
+    return res?.refund ?? res;
   },
 
   /**

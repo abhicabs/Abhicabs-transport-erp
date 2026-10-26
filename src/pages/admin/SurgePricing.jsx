@@ -29,12 +29,13 @@ import SearchInput  from '../../components/ui/SearchInput';
 import { useToast } from '../../hooks/useToast';
 import { surgeService } from '../../services/surgeService';
 
-const TIERS = ['METRO', 'TALUKA', 'VILLAGE'];
+const TIERS = ['METRO', 'DISTRICT', 'TALUKA', 'VILLAGE'];
 
 const TIER_META = {
-  METRO:   { icon: '🏙️', label: 'Metro', desc: 'City / urban — drivers nearby', bg: '#EFF6FF', color: '#1D4ED8', tone: 'blue' },
-  TALUKA:  { icon: '🏘️', label: 'Taluka', desc: 'Town / semi-urban — moderate supply', bg: '#FFF7ED', color: '#C2410C', tone: 'amber' },
-  VILLAGE: { icon: '🌾', label: 'Village', desc: 'Rural — limited driver supply', bg: '#F0FDF4', color: '#15803D', tone: 'green' },
+  METRO:    { icon: '🏙️', label: 'Metro', desc: 'City / urban — drivers nearby', bg: '#EFF6FF', color: '#1D4ED8', tone: 'blue' },
+  DISTRICT: { icon: '🏢', label: 'District', desc: 'District HQ with fleet presence', bg: '#F5F3FF', color: '#6D28D9', tone: 'purple' },
+  TALUKA:   { icon: '🏘️', label: 'Taluka', desc: 'Town / semi-urban — moderate supply', bg: '#FFF7ED', color: '#C2410C', tone: 'amber' },
+  VILLAGE:  { icon: '🌾', label: 'Village', desc: 'Rural — limited driver supply', bg: '#F0FDF4', color: '#15803D', tone: 'green' },
 };
 
 const TIER_OPTIONS = TIERS.map((t) => ({ value: t, label: `${TIER_META[t].icon} ${TIER_META[t].label} — ${TIER_META[t].desc}` }));
@@ -83,7 +84,7 @@ function SurgeFeeSetup({ rules, onSave }) {
   if (rules.length === 0) {
     return (
       <Alert type="info">
-        No surge rules found. Seed the database with METRO, TALUKA, and VILLAGE rules to configure surge fees here.
+        No surge rules found. Seed the database with METRO, DISTRICT, TALUKA, and VILLAGE rules to configure surge fees here.
       </Alert>
     );
   }

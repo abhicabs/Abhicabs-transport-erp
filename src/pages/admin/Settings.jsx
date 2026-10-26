@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Save, Eye, EyeOff, Key, Bell, Building2, Shield, Trophy, Plus, Trash2 } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import PageTabs from '../../components/ui/PageTabs';
@@ -11,6 +11,7 @@ import Badge      from '../../components/ui/Badge';
 import { useToast } from '../../hooks/useToast';
 import { APP_NAME } from '../../constants';
 import { authService } from '../../services';
+import { apiClient } from '../../services/apiClient';
 import { getTiers, saveTiers } from '../../lib/loyaltyTiers';
 
 const TABS = [
@@ -57,12 +58,39 @@ export default function Settings() {
   });
   const [changingPass, setChangingPass] = useState(false);
 
-  // HONEST STATE: there is no backend endpoint for company profile or
-  // notification preferences (confirmed — no matching route in adminService
-  // or anywhere else). These previously showed "saved" with nothing behind
-  // it. They now say plainly that the change only lives in this browser tab.
-  const saveCompany = () => toast.success('Company details updated for this session only — there is no backend endpoint yet to save this permanently.');
-  const saveNotifs  = () => toast.success('Preferences updated for this session only — there is no backend endpoint yet to save this permanently.');
+  // Load saved settings on mount
+  useEffect(() => {
+    apiClient.get('/admin/settings/company').then((res) => {
+      const data = res?.data ?? res;
+      if (data && typeof data === 'object') setCompany((prev) => ({ ...prev, ...data }));
+    }).catch(() => {});
+    apiClient.get('/admin/settings/notifications').then((res) => {
+      const data = res?.data ?? res;
+      if (data && typeof data === 'object') setNotifs((prev) => ({ ...prev, ...data }));
+    }).catch(() => {});
+  }, []);
+
+  const [savingCompany, setSavingCompany] = useState(false);
+  const [savingNotifs, setSavingNotifs] = useState(false);
+
+  const saveCompany = async () => {
+    setSavingCompany(true);
+    try {
+      await apiClient.put('/admin/settings/company', company);
+      toast.success('Company details saved');
+    } catch (e) {
+      toast.error(e.message || 'Could not save company settings');
+    } finally { setSavingCompany(false); }
+  };
+  const saveNotifs = async () => {
+    setSavingNotifs(true);
+    try {
+      await apiClient.put('/admin/settings/notifications', notifs);
+      toast.success('Notification preferences saved');
+    } catch (e) {
+      toast.error(e.message || 'Could not save notification preferences');
+    } finally { setSavingNotifs(false); }
+  };
 
   // Change password DOES have a real, working backend endpoint
   // (POST /auth/change-password, already wired in authService.changePassword)
@@ -98,7 +126,7 @@ export default function Settings() {
           <h3 className="text-sm font-bold" style={{ color: '#111111' }}>Company Profile</h3>
           <Alert type="info">
             These details appear on generated invoices and customer communications. Saving here updates
-            this session only — there is no backend endpoint yet to persist company profile changes.
+            these details appear on generated invoices and customer communications.
           </Alert>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <FormField label="Company name" className="sm:col-span-2">
@@ -120,7 +148,7 @@ export default function Settings() {
               <Input value={company.pan} onChange={(e) => setCompany((c) => ({ ...c, pan: e.target.value }))} placeholder="AAAAA1234A" />
             </FormField>
           </div>
-          <Button icon={Save} onClick={saveCompany}>Save company settings</Button>
+          <Button icon={Save} loading={savingCompany} onClick={saveCompany}>Save company settings</Button>
         </Card>
       )}
 
@@ -133,7 +161,7 @@ export default function Settings() {
           <h3 className="text-sm font-bold" style={{ color: '#111111' }}>Notification Preferences</h3>
           <Alert type="info">
             WhatsApp and SMS notifications require MSG91 credentials in the backend .env file. Saving
-            here updates this session only — there is no backend endpoint yet to persist these preferences.
+            these control which automated messages are sent when bookings and trips are updated.
           </Alert>
           <div className="space-y-4">
             <div>
@@ -151,7 +179,7 @@ export default function Settings() {
               </div>
             </div>
           </div>
-          <Button icon={Save} onClick={saveNotifs}>Save preferences</Button>
+          <Button icon={Save} loading={savingNotifs} onClick={saveNotifs}>Save preferences</Button>
         </Card>
       )}
 
