@@ -169,13 +169,20 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
     if (!canManageBookings) return; // only users who can confirm should be nagged
     const bookingId = payload?.bookingId || payload?.id;
     if (!bookingId) return;
-    if (payload?.status && payload.status !== 'PENDING') return; // already past PENDING
+    // Don't filter on payload.status here — the socket payload often has no
+    // status field at all (slimBooking defaults to 'PENDING' but the raw
+    // event from the service omits it entirely). Always try to show the popup.
 
+    // Try to enrich with full booking data, but NEVER let a failed fetch
+    // silently prevent the popup from showing.
     let full = null;
     try { full = await bookingService.get(bookingId); } catch { /* fall back to payload */ }
     const b = full || {};
     const status = b.status || payload.status || 'PENDING';
-    if (status !== 'PENDING') return; // confirmed/cancelled before we could show it
+
+    // Only skip if we CONFIRMED from the backend that it's past PENDING.
+    // If the fetch failed (full === null), assume PENDING and show the popup.
+    if (full && status !== 'PENDING') return;
 
     upsertBookingAlert({
       id: bookingId,
@@ -188,7 +195,7 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
       tripType: b.tripType || payload.tripType || '',
       pickupAt: b.pickupAt || payload.pickupAt || null,
       estimatedFare: Number(b.finalFare ?? b.estimatedFare ?? payload.estimatedFare ?? 0),
-      status,
+      status: 'PENDING',
       at: new Date().toISOString(),
     });
   }, [canManageBookings, upsertBookingAlert]);
