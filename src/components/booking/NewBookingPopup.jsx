@@ -130,16 +130,20 @@ export default function NewBookingPopup() {
 
 const S = {
   overlay: {
-    position: 'fixed', inset: 0, zIndex: 1400,
+    position: 'fixed', inset: 0, zIndex: 9999,
     background: 'rgba(17,17,17,0.45)', backdropFilter: 'blur(2px)',
-    display: 'grid', placeItems: 'center', padding: 16,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    padding: '16px 12px',
+    overflowY: 'auto', WebkitOverflowScrolling: 'touch',
     animation: 'abhiFadeIn 0.18s ease-out',
   },
   card: {
     width: '100%', maxWidth: 440, background: '#fff', borderRadius: 22,
-    padding: '28px 26px 22px', textAlign: 'center',
+    padding: '24px 20px 18px', textAlign: 'center',
     boxShadow: '0 24px 60px rgba(17,17,17,0.28)',
     animation: 'abhiPopIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+    maxHeight: 'calc(100vh - 32px)', overflowY: 'auto',
+    margin: 'auto',
   },
   iconWrap: {
     width: 62, height: 62, margin: '0 auto 14px', borderRadius: '50%',
