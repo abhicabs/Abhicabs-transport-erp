@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Plus, Pencil, Trash2, Users, AlertTriangle, CheckCircle, Clock, Shield, XCircle, Eye, FileText, RotateCcw, PowerOff } from 'lucide-react';
 import PageHeader    from '../../components/ui/PageHeader';
 import Button        from '../../components/ui/Button';
@@ -21,6 +21,7 @@ import { VEHICLE_STATUS, PERMISSIONS } from '../../constants';
 import { useAuth }   from '../../hooks/useAuth';
 import { formatDateTime, titleCase } from '../../utils/formatters';
 import { VEHICLE_CLASSES } from '../../constants';
+import { vehicleCatalogService } from '../../services/vehicleCatalogService';
 
 // Backend listVehiclesQuerySchema accepts:
 //   search, status, vehicleClass, isActive, sortBy, order, page, limit
@@ -452,27 +453,183 @@ function PendingTab() {
   );
 }
 
+// ── Booking Control tab ──────────────────────────────────────────────────────
+function BookingControlTab() {
+  const toast = useToast();
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [toggling, setToggling] = useState(null);
+  const [reason, setReason] = useState('');
+  const [showReason, setShowReason] = useState(null);
+
+  const loadStatus = async () => {
+    setLoading(true);
+    try {
+      const data = await vehicleCatalogService.bookingStatus();
+      setStatus(data);
+    } catch (e) {
+      toast.error(e?.message || 'Could not load booking status');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadStatus(); }, []);
+
+  const toggleClass = async (key, enabled) => {
+    setToggling(key);
+    try {
+      await vehicleCatalogService.setBooking(key, enabled, reason);
+      toast.success(enabled ? `${key} booking enabled` : `${key} booking disabled`);
+      setReason('');
+      setShowReason(null);
+      await loadStatus();
+    } catch (e) {
+      toast.error(e?.message || 'Could not update booking status');
+    } finally {
+      setToggling(null);
+    }
+  };
+
+  const toggleAll = async (enabled) => {
+    setToggling('__all');
+    try {
+      await vehicleCatalogService.setBookingAll(enabled, reason);
+      toast.success(enabled ? 'All bookings enabled' : 'All bookings disabled');
+      setReason('');
+      setShowReason(null);
+      await loadStatus();
+    } catch (e) {
+      toast.error(e?.message || 'Could not update booking status');
+    } finally {
+      setToggling(null);
+    }
+  };
+
+  if (loading) return <div className="text-center py-12 text-sm" style={{ color: '#6B7280' }}>Loading booking status…</div>;
+  if (!status) return <Alert type="error">Could not load booking status.</Alert>;
+
+  const allDisabled = status.allDisabled || false;
+  const vehicles = status.vehicles || [];
+  const disabledReason = status.reason || '';
+
+  return (
+    <div>
+      {/* Global kill switch */}
+      <div className="rounded-xl border p-5 mb-5" style={{ borderColor: allDisabled ? '#FECACA' : '#D1FAE5', backgroundColor: allDisabled ? '#FEF2F2' : '#F0FDF4' }}>
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              {allDisabled ? <XCircle size={20} style={{ color: '#EF4444' }} /> : <CheckCircle size={20} style={{ color: '#10B981' }} />}
+              <h3 style={{ fontWeight: 700, fontSize: 16, color: '#1F2937' }}>
+                {allDisabled ? 'All Bookings DISABLED' : 'Bookings are LIVE'}
+              </h3>
+            </div>
+            <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>
+              {allDisabled
+                ? `All vehicle bookings are turned off. ${disabledReason ? `Reason: ${disabledReason}` : 'No reason given.'}`
+                : 'Customers can book available vehicles. Disable individual classes below or use the emergency stop.'}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {allDisabled ? (
+              <Button variant="primary" icon={CheckCircle} loading={toggling === '__all'} onClick={() => toggleAll(true)}>
+                Enable All Bookings
+              </Button>
+            ) : (
+              <>
+                {showReason === '__all' ? (
+                  <div className="flex items-center gap-2">
+                    <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #D1D5DB', fontSize: 13, width: 200 }} />
+                    <Button variant="danger" loading={toggling === '__all'} onClick={() => toggleAll(false)}>Confirm</Button>
+                    <Button variant="secondary" onClick={() => { setShowReason(null); setReason(''); }}>Cancel</Button>
+                  </div>
+                ) : (
+                  <Button variant="dangerOutline" icon={PowerOff} onClick={() => setShowReason('__all')}>
+                    Emergency Stop — Disable All
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Per-class toggles */}
+      <div className="rounded-xl border overflow-hidden" style={{ borderColor: '#E5E7EB' }}>
+        <div style={{ padding: '14px 20px', backgroundColor: '#F9FAFB', borderBottom: '1px solid #E5E7EB' }}>
+          <h4 style={{ fontWeight: 700, fontSize: 14, color: '#374151' }}>Per-Vehicle Class Booking Control</h4>
+          <p style={{ fontSize: 12.5, color: '#6B7280', marginTop: 2 }}>Toggle booking on/off for individual vehicle types. Disabled classes won't appear in fare options.</p>
+        </div>
+        <div>
+          {vehicles.length === 0 ? (
+            <div className="text-center py-10" style={{ color: '#6B7280', fontSize: 13 }}>No vehicle classes found. Add vehicles to the catalog first.</div>
+          ) : (
+            vehicles.map((v, i) => {
+              const isBookable = v.bookingEnabled !== false;
+              const isTogglingThis = toggling === v.key;
+              return (
+                <div key={v.key} className="flex items-center justify-between gap-4 px-5 py-3.5" style={{ borderBottom: i < vehicles.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div style={{ width: 40, height: 40, borderRadius: 10, backgroundColor: isBookable ? '#F0FDF4' : '#FEF2F2', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      {isBookable ? <CheckCircle size={18} style={{ color: '#10B981' }} /> : <XCircle size={18} style={{ color: '#EF4444' }} />}
+                    </div>
+                    <div className="min-w-0">
+                      <p style={{ fontWeight: 600, fontSize: 14, color: '#1F2937' }} className="truncate">{v.name || titleCase(v.key)}</p>
+                      <p style={{ fontSize: 12, color: '#6B7280' }}>
+                        {v.seats ? `${v.seats} seats` : v.key}
+                        {v.disabledReason ? ` · ${v.disabledReason}` : ''}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {showReason === v.key ? (
+                      <>
+                        <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #D1D5DB', fontSize: 12.5, width: 180 }} />
+                        <Button size="sm" variant="danger" loading={isTogglingThis} onClick={() => toggleClass(v.key, false)}>Disable</Button>
+                        <Button size="sm" variant="secondary" onClick={() => { setShowReason(null); setReason(''); }}>Cancel</Button>
+                      </>
+                    ) : isBookable ? (
+                      <Button size="sm" variant="dangerOutline" icon={PowerOff} loading={isTogglingThis} onClick={() => setShowReason(v.key)}>
+                        Disable
+                      </Button>
+                    ) : (
+                      <Button size="sm" variant="primary" icon={CheckCircle} loading={isTogglingThis} onClick={() => toggleClass(v.key, true)}>
+                        Enable
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 export default function Vehicles() {
   const [tab, setTab] = useState('fleet');
   const { hasPermission, isAdmin } = useAuth();
   const canManage = hasPermission(PERMISSIONS.VEHICLES_MANAGE);
-  // Permanent delete is ADMIN-only on the backend (requireRole('ADMIN')),
-  // stricter than VEHICLE_MANAGE, which FLEET staff also hold.
   const canDelete = canManage && isAdmin;
   const { data: pendingData } = useApi(() => apiClient.get('/admin/vehicles', { params: { status: 'INACTIVE', isActive: 'false', limit: 1, page: 1 } }), []);
   const pendingCount = pendingData?.meta?.total ?? pendingData?.pagination?.total ?? 0;
 
   const tabs = [
-    { key: 'fleet',   label: 'Fleet Vehicles' },
-    { key: 'pending', label: 'Inactive Vehicles', badge: pendingCount },
+    { key: 'fleet',    label: 'Fleet Vehicles' },
+    { key: 'booking',  label: 'Booking Control' },
+    { key: 'pending',  label: 'Inactive Vehicles', badge: pendingCount },
   ];
 
   return (
     <div>
-      <PageHeader title="Vehicles" description="Manage your fleet and review driver-submitted vehicle applications." />
+      <PageHeader title="Vehicles" description="Manage your fleet, control bookings, and review vehicle applications." />
       <PageTabs tabs={tabs} value={tab} onChange={setTab} />
       {tab === 'fleet'   && <FleetTab canManage={canManage} canDelete={canDelete} />}
+      {tab === 'booking' && <BookingControlTab />}
       {tab === 'pending' && <PendingTab />}
     </div>
   );

@@ -84,6 +84,24 @@ export const vehicleCatalogService = {
    * Catalogue names are merged in for readable labels — this endpoint returns
    * bare keys like "innova-crysta".
    */
+  /** GET /admin/vehicles/booking/status — which classes are disabled and global toggle */
+  async bookingStatus() {
+    const res = await apiClient.get('/admin/vehicles/booking/status');
+    return unwrap(res);
+  },
+
+  /** PATCH /admin/vehicles/:key/booking — enable/disable one class */
+  async setBooking(key, enabled, reason = '') {
+    const res = await apiClient.patch(`/admin/vehicles/${key}/booking`, { enabled, ...(reason ? { reason } : {}) });
+    return unwrap(res);
+  },
+
+  /** PATCH /admin/vehicles/booking/all — enable/disable ALL classes */
+  async setBookingAll(enabled, reason = '') {
+    const res = await apiClient.patch('/admin/vehicles/booking/all', { enabled, ...(reason ? { reason } : {}) });
+    return unwrap(res);
+  },
+
   async rateCardOptions() {
     const [classesRes, catalogue] = await Promise.all([
       apiClient.get('/admin/fare-configs/vehicle-classes').catch(() => null),
