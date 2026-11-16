@@ -86,6 +86,27 @@ function persistFeed(feed) {
   try { sessionStorage.setItem(FEED_STORAGE_KEY, JSON.stringify(feed)); } catch { /* ignore */ }
 }
 
+// Reminder stages for trips that still have no vehicle / driver.
+const DISPATCH_STAGES = [
+  { key: 'overdue', max: 0,   label: 'pickup time has passed' },
+  { key: '30m',     max: 30,  label: 'pickup within 30 minutes' },
+  { key: '1h',      max: 60,  label: 'pickup within 1 hour' },
+  { key: '2h',      max: 120, label: 'pickup within 2 hours' },
+  { key: '3h',      max: 180, label: 'pickup within 3 hours' },
+];
+export const dispatchStage = (minutes) => DISPATCH_STAGES.find((s) => minutes <= s.max) || null;
+const DISPATCH_ALERTED_KEY = 'abhi_dispatch_alerted';
+function readDispatchAlerted() {
+  try { return JSON.parse(localStorage.getItem(DISPATCH_ALERTED_KEY) || '{}'); } catch { return {}; }
+}
+function writeDispatchAlerted(map) {
+  try {
+    const cutoff = Date.now() - 2 * 86400000; // forget after 2 days
+    const kept = Object.fromEntries(Object.entries(map).filter(([, t]) => t > cutoff));
+    localStorage.setItem(DISPATCH_ALERTED_KEY, JSON.stringify(kept));
+  } catch { /* storage unavailable */ }
+}
+
 export function AdminRealtimeProvider({ children, enabled = true }) {
   const toast = useToast();
   const socketRef = useRef(null);
@@ -286,6 +307,110 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
   // drops immediately instead of at the next poll.
   const refreshRequestCount = pollRequests;
 
+  // ── WhatsApp handoffs: a customer asked for a person ──────────────────
+  // Live via the 'whatsapp:handoff' socket event (ADMIN / OPS), plus a poll
+  // every 45 s of /admin/whatsapp/conversations?filter=handoff — the poll is
+  // what reaches SUPPORT users (not in the socket rooms) and anyone whose
+  // socket dropped. Each waiting conversation alerts once; once staff resolve
+  // it and it leaves the queue, a new handoff from the same customer alerts again.
+  const [handoffCount, setHandoffCount] = useState(0);
+  const seenHandoffsRef = useRef(new Set());
+  const handoffFirstRunRef = useRef(true);
+
+  const announceHandoff = useCallback((h) => {
+    const key = String(h.sessionId || h.id || h.whatsappNumber);
+    if (seenHandoffsRef.current.has(key)) return;
+    seenHandoffsRef.current.add(key);
+    const who = h.customerName || h.customer?.name || `+${h.whatsappNumber}`;
+    const why = h.reasonText || (h.reason || h.handoffReason || '').replace(/_/g, ' ').toLowerCase() || 'asked for help';
+    pushFeedItem({ kind: 'whatsapp:handoff', sessionId: key, customerName: who, whatsappNumber: h.whatsappNumber, text: `${who} needs a person — ${why}` });
+    toast.error(`💬 WhatsApp: ${who} needs a person — ${why}`, { duration: 20000 });
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        new Notification('WhatsApp: customer needs a person', { body: `${who} — ${why}`, tag: `wa-handoff-${key}` });
+      }
+    } catch { /* unsupported */ }
+  }, [pushFeedItem, toast]);
+
+  const pollHandoffs = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/admin/whatsapp/conversations', { params: { filter: 'handoff', limit: 100 } });
+      const rows = Array.isArray(res) ? res : (res?.data ?? res?.items ?? []);
+      const waiting = rows.filter((r) => r.humanHandoff);
+      setHandoffCount(waiting.length);
+      const ids = new Set(waiting.map((r) => String(r.id)));
+      // Forget resolved ones, so the same customer alerts again next time.
+      for (const k of [...seenHandoffsRef.current]) if (!ids.has(k)) seenHandoffsRef.current.delete(k);
+      if (handoffFirstRunRef.current) {
+        handoffFirstRunRef.current = false;
+        waiting.forEach((r) => seenHandoffsRef.current.add(String(r.id)));
+        if (waiting.length) toast.error(`💬 ${waiting.length} WhatsApp customer${waiting.length > 1 ? 's are' : ' is'} waiting for a person`, { duration: 10000 });
+        return;
+      }
+      waiting.forEach((r) => announceHandoff({ ...r, sessionId: r.id }));
+    } catch { /* no access or bot down — try again next time */ }
+  }, [announceHandoff, toast]);
+
+  useEffect(() => {
+    if (!enabled || USE_MOCK) return undefined;
+    pollHandoffs();
+    const interval = setInterval(pollHandoffs, 45000);
+    return () => clearInterval(interval);
+  }, [enabled, pollHandoffs]);
+
+  // ── Dispatch reminder: trips close to pickup with no vehicle / driver ──
+  // Polls GET /admin/dispatch/unassigned-soon every minute. Alerts once per
+  // booking per stage (3 h, 2 h, 1 h, 30 min, pickup passed) with a toast,
+  // a chime, a bell entry and — if the browser allows — a desktop notification.
+  // The stages already alerted are remembered in localStorage, so a page
+  // refresh doesn't repeat them.
+  const canDispatch = hasPermission(PERMISSIONS.DISPATCH_MANAGE);
+  const [unassignedSoon, setUnassignedSoon] = useState([]);
+
+  const pollUnassigned = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/admin/dispatch/unassigned-soon', { params: { hours: 3 } });
+      const items = res?.items ?? res?.data?.items ?? [];
+      setUnassignedSoon(items);
+
+      const alerted = readDispatchAlerted();
+      const fresh = [];
+      for (const b of items) {
+        const stage = dispatchStage(b.minutesToPickup);
+        if (!stage) continue;
+        const key = `${b.id}:${stage.key}`;
+        if (alerted[key]) continue;
+        alerted[key] = Date.now();
+        fresh.push({ b, stage });
+      }
+      writeDispatchAlerted(alerted);
+
+      fresh.forEach(({ b, stage }) => {
+        const what = b.needsConfirmation ? 'not confirmed, no vehicle or driver'
+          : b.missing === 'DRIVER' ? 'no driver assigned' : 'no vehicle or driver assigned';
+        const text = `${b.bookingNumber}: ${what} — ${stage.label}`;
+        pushFeedItem({ kind: 'dispatch:unassigned', bookingId: b.id, bookingNumber: b.bookingNumber, text, customerName: b.customerName });
+        toast.error(`⏰ ${text} (${b.customerName})`, { duration: 15000 });
+        try {
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification('Dispatch pending', { body: text, tag: `dispatch-${b.id}` });
+          }
+        } catch { /* notifications unsupported */ }
+      });
+    } catch { /* best-effort: the next poll retries */ }
+  }, [pushFeedItem, toast]);
+
+  useEffect(() => {
+    if (!enabled || USE_MOCK || !canDispatch) return undefined;
+    // Ask once for desktop notifications so a reminder is seen even in another tab.
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') Notification.requestPermission();
+    } catch { /* ignore */ }
+    pollUnassigned();
+    const interval = setInterval(pollUnassigned, 60000);
+    return () => clearInterval(interval);
+  }, [enabled, canDispatch, pollUnassigned]);
+
   // NEW: abandoned-checkout notifications, via polling — NOT a real-time
   // push. The customer website logs an abandoned checkout as a genuine
   // Contact/Support record (topic "Abandoned Booking"), but creating a
@@ -428,6 +553,11 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
           pushFeedItem({ kind: 'booking:attempted', ...payload });
         });
 
+        socket.on('whatsapp:handoff', (payload) => {
+          announceHandoff(payload);
+          pollHandoffs();
+        });
+
         socket.on('admin:alert', (payload) => {
           toast.error(`Booking attempt failed — ${payload.reason || 'unknown reason'}`, { duration: 8000 });
           pushFeedItem({ kind: 'admin:alert', ...payload });
@@ -476,6 +606,8 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
     <AdminRealtimeContext.Provider value={{
       connected, feed, lastEventId, lastBookingEventId,
       newRequestCount, requestTick, refreshRequestCount,
+      unassignedSoon, refreshUnassigned: pollUnassigned,
+      handoffCount, refreshHandoffs: pollHandoffs,
       bookingAlerts, confirmBookingAlert, dismissBookingAlert, removeBookingAlert,
     }}>
       {children}

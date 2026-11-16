@@ -78,7 +78,11 @@ export default function Navbar({ onMenuClick, title, liveConnected, followUpsDue
 
   const goToNotification = (item) => {
     closeNotif();
-    if (item.kind === 'booking_request:created') {
+    if (item.kind === 'whatsapp:handoff') {
+      navigate('/admin/whatsapp?tab=conversations&filter=handoff');
+    } else if (item.kind === 'dispatch:unassigned') {
+      navigate('/admin/dispatch');
+    } else if (item.kind === 'booking_request:created') {
       navigate('/admin/booking-requests');
     } else if (item.bookingId) {
       navigate(`/admin/bookings`);
@@ -221,6 +225,8 @@ const NOTIF_META = {
   'booking:allocated': { icon: Truck,     label: (i) => `Vehicle assigned${i.bookingNumber ? ` to ${i.bookingNumber}` : ''}`, clickable: true },
   'payment:received':  { icon: CreditCard, label: (i) => `Payment received${i.amount ? ` — ₹${Number(i.amount).toLocaleString('en-IN')}` : ''}`, clickable: true },
   'booking_request:created': { icon: Inbox, label: (i) => `Booking request ${i.requestNumber || ''}${i.contactName ? ` — ${i.contactName}` : ''}`.trim(), clickable: true },
+  'whatsapp:handoff': { icon: AlertTriangle, label: (i) => `💬 ${i.text || `${i.customerName || 'WhatsApp customer'} needs a person`}`, clickable: true },
+  'dispatch:unassigned': { icon: AlertTriangle, label: (i) => `⏰ ${i.text || `${i.bookingNumber} needs a vehicle / driver`}`, clickable: true },
   'booking:abandoned': { icon: MessageSquareWarning, label: (i) => `Abandoned — ${i.name || i.pickupAddress?.split(',')[0] || 'unknown customer'}`, clickable: true },
 };
 

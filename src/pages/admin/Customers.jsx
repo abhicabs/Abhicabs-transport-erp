@@ -42,13 +42,18 @@ const SORT_OPTIONS = [
   { value: 'name',          label: 'Name'           },
 ];
 
+// Generated addresses (app phone login, WhatsApp bot): the account is real, it just has no email.
+function isPlaceholderEmail(email) {
+  const e = (email || '').toLowerCase();
+  return e.endsWith('@placeholder.local') || e.endsWith('@whatsapp.invalid');
+}
+
 function isGuestCustomer(r) {
   if (typeof r?.isGuest === 'boolean') return r.isGuest;
   const email = (r?.user?.email || '').toLowerCase();
-  return !email
-    || email.endsWith('@placeholder.local')
-    || email.endsWith('@whatsapp.invalid')
-    || email.endsWith('@guest.invalid')
+  // Fallback only (the backend now sends isGuest). App phone-login and WhatsApp
+  // customers have generated emails too, but they are real accounts, not guests.
+  return email.endsWith('@guest.invalid')
     || email.startsWith('guest.')
     || email.startsWith('guest-');
 }
@@ -205,21 +210,18 @@ export default function Customers() {
       key: 'name', header: 'Customer',
       render: (r) => {
         const guest = isGuestCustomer(r);
-        const displayName = guest
-          ? (r.user?.name === 'Guest' ? 'Guest Customer' : r.user?.name || 'Guest Customer')
-          : (r.user?.name || '—');
+        // Always the person's own name. For a website guest it is the name they
+        // typed at checkout (backend: displayName / guestName from their booking),
+        // never the word "Guest". Guest-ness is shown in the User column instead.
+        const accountName = r.user?.name && !/^guest$/i.test(r.user.name.trim()) ? r.user.name : null;
+        const displayName = r.displayName || r.guestName || accountName || 'Name not given';
+        const contactLine = guest
+          ? (r.guestEmail || 'No email given')
+          : (isPlaceholderEmail(r.user?.email) ? 'No email (phone login)' : (r.user?.email || '—'));
         return (
           <div>
-            <p style={{ fontWeight: 600, color: '#1F2937' }} className="flex items-center gap-1.5">
+            <p style={{ fontWeight: 600, color: displayName === 'Name not given' ? '#9CA3AF' : '#1F2937' }} className="flex items-center gap-1.5">
               {displayName}
-              {guest && (
-                <span
-                  className="inline-flex items-center text-[10.5px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide"
-                  style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
-                >
-                  Guest
-                </span>
-              )}
               {r.isLive && (
                 <span
                   className="inline-flex items-center gap-1 text-[10.5px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide"
@@ -233,7 +235,7 @@ export default function Customers() {
             </p>
             <p style={{ fontSize: 13.5, color: '#6B7280' }} className="flex items-center gap-1">
               <Mail size={11} />
-              {guest ? 'Web checkout — no account' : (r.user?.email || '—')}
+              {contactLine}
             </p>
           </div>
         );
@@ -243,7 +245,7 @@ export default function Customers() {
       key: 'phone', header: 'Phone',
       render: (r) => (
         <span className="flex items-center gap-1" style={{ fontSize: 13, color: '#6B7280' }}>
-          <Phone size={12} />{r.user?.phone || '—'}
+          <Phone size={12} />{r.displayPhone || r.user?.phone || r.guestPhone || '—'}
         </span>
       ),
     },
@@ -251,7 +253,7 @@ export default function Customers() {
       key: 'userType', header: 'User',
       render: (r) => (
         isGuestCustomer(r)
-          ? <Badge tone="amber">Guest</Badge>
+          ? <Badge tone="amber">Guest user</Badge>
           : <Badge tone="green">Registered</Badge>
       ),
     },

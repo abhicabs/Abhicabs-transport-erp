@@ -20,6 +20,31 @@ import { useForm }  from '../../hooks/useForm';
 import { formatCurrency, formatDate, formatDateTime, titleCase, accountTypeLabel } from '../../utils/formatters';
 import { getTierForPoints, getNextTier } from '../../lib/loyaltyTiers';
 
+// Where a booking was made. The backend stores it as booking.meta.channel and
+// returns it on the staff booking list as `channel`; ?channel= filters on it.
+const CHANNELS = [
+  { key: '',         label: 'All' },
+  { key: 'WEBSITE',  label: 'Website' },
+  { key: 'APP',      label: 'App' },
+  { key: 'WHATSAPP', label: 'WhatsApp' },
+  { key: 'ADMIN',    label: 'Admin / ERP' },
+];
+const CHANNEL_STYLE = {
+  WEBSITE:  { label: 'Website',  bg: '#eff6ff', color: '#1d4ed8' },
+  APP:      { label: 'App',      bg: '#f5f3ff', color: '#6d28d9' },
+  WHATSAPP: { label: 'WhatsApp', bg: '#ecfdf5', color: '#047857' },
+  ADMIN:    { label: 'Admin',    bg: '#fff7ed', color: '#c2410c' },
+  OTHER:    { label: 'Other',    bg: '#f3f4f6', color: '#4b5563' },
+};
+function ChannelTag({ channel }) {
+  const c = CHANNEL_STYLE[channel] || CHANNEL_STYLE.OTHER;
+  return (
+    <span className="text-[10.5px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
+      style={{ backgroundColor: c.bg, color: c.color }}>{c.label}</span>
+  );
+}
+const BOOKINGS_PER_PAGE = 10;
+
 function addr(val) {
   if (!val) return '—';
   if (typeof val === 'string') return val;
@@ -87,10 +112,31 @@ export default function CustomerDetail() {
   const [editOpen, setEditOpen] = useState(false);
 
   const customer = useApi(() => adminCustomersService.get(id), [id]);
+  const [channel, setChannel] = useState('');
+  const [bookingPage, setBookingPage] = useState(1);
+  useEffect(() => { setBookingPage(1); }, [channel, id]);
+
   const bookings = useApi(
-    () => bookingService.list({ customerId: id, page: 1, limit: 10, sortBy: 'createdAt' }),
-    [id]
+    () => bookingService.list({
+      customerId: id, page: bookingPage, limit: BOOKINGS_PER_PAGE, sortBy: 'createdAt',
+      ...(channel ? { channel } : {}),
+    }),
+    [id, channel, bookingPage]
   );
+  const bookingMeta = bookings.data?.meta ?? bookings.data?.pagination ?? {};
+  const bookingPages = bookingMeta.totalPages ?? 1;
+
+  // How many of this customer's bookings came from each channel (one tiny
+  // request per channel: limit=1, read the total).
+  const channelCounts = useApi(async () => {
+    const entries = await Promise.all(CHANNELS.map(async (c) => {
+      try {
+        const res = await bookingService.list({ customerId: id, page: 1, limit: 1, ...(c.key ? { channel: c.key } : {}) });
+        return [c.key, (res?.meta ?? res?.pagination)?.total ?? null];
+      } catch { return [c.key, null]; }
+    }));
+    return Object.fromEntries(entries);
+  }, [id]);
 
   // FIX: "Total Bookings" / "Completed" / "Total Spend" used to be computed
   // from the same 10-row "Recent Bookings" preview above — accurate only for
@@ -136,6 +182,17 @@ export default function CustomerDetail() {
   const c = customer.data;
   const recentBookings = bookings.data?.data ?? bookings.data?.items ?? bookings.data ?? [];
 
+  // Guest contact details come from a booking. Remember the first one found so
+  // the header doesn't change when the source filter or page changes.
+  const [guestContact, setGuestContact] = useState(null);
+  useEffect(() => { setGuestContact(null); }, [id]);
+  useEffect(() => {
+    if (guestContact) return;
+    const found = (Array.isArray(recentBookings) ? recentBookings : []).find((b) => b.guestName || b.guestPhone);
+    if (found) setGuestContact({ guestName: found.guestName, guestPhone: found.guestPhone, guestEmail: found.guestEmail });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookings.data]);
+
   const { values, errors, touched, submitting, setValue, setFieldTouched, handleSubmit, setValues } = useForm({
     initialValues: {
       accountType: c?.accountType || 'RETAIL',
@@ -174,7 +231,7 @@ export default function CustomerDetail() {
   })();
 
   // For guests, pull real name/phone/email from their most recent booking
-  const guestBooking = isGuest ? recentBookings.find((b) => b.guestName || b.guestPhone) : null;
+  const guestBooking = isGuest ? guestContact : null;
   const displayName  = isGuest
     ? (guestBooking?.guestName || 'Guest Customer')
     : (c.user?.name || '—');
@@ -272,12 +329,32 @@ export default function CustomerDetail() {
         {/* Recent bookings */}
         <Card padded={false} className="lg:col-span-2">
           <div className="px-5 pt-5 pb-3">
-            <h2 className="text-sm font-bold" style={{ color: '#1F2937' }}>Recent Bookings</h2>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h2 className="text-sm font-bold" style={{ color: '#1F2937' }}>Bookings</h2>
+              <div className="flex gap-1.5 flex-wrap">
+                {CHANNELS.map((c) => {
+                  const active = channel === c.key;
+                  const count = channelCounts.data?.[c.key];
+                  return (
+                    <button key={c.key || 'all'} type="button" onClick={() => setChannel(c.key)}
+                      className="text-xs font-semibold rounded-full px-3 py-1 border"
+                      style={{
+                        backgroundColor: active ? '#1F2937' : '#fff',
+                        color: active ? '#fff' : '#374151',
+                        borderColor: active ? '#1F2937' : '#E5E7EB',
+                      }}>
+                      {c.label}{count != null ? ` (${count})` : ''}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
           {bookings.status === 'loading' && <LoadingState label="Loading bookings…" />}
           {bookings.status !== 'loading' && recentBookings.length === 0 && (
-            <EmptyState icon={CalendarCheck} title="No bookings yet"
-              description="This customer has not made any bookings yet." />
+            <EmptyState icon={CalendarCheck}
+              title={channel ? `No ${CHANNELS.find((c) => c.key === channel)?.label} bookings` : 'No bookings yet'}
+              description={channel ? 'Try another source.' : 'This customer has not made any bookings yet.'} />
           )}
           {recentBookings.length > 0 && (
             <div>
@@ -287,11 +364,14 @@ export default function CustomerDetail() {
                   style={{ borderBottom: idx < recentBookings.length - 1 ? '1px solid #F3F4F6' : 'none' }}
                   onClick={() => navigate(`/admin/bookings/${b.id}`)}>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate" style={{ color: '#1F2937' }}>
-                      {addr(b.pickupAddress)} → {addr(b.dropAddress)}
-                    </p>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ChannelTag channel={b.channel} />
+                      <p className="text-sm font-medium truncate" style={{ color: '#1F2937' }}>
+                        {addr(b.pickupAddress)} → {addr(b.dropAddress)}
+                      </p>
+                    </div>
                     <p className="text-xs mt-0.5" style={{ color: '#6B7280' }}>
-                      {b.tripType?.replace(/_/g,' ')} · {titleCase(b.vehicleClass || '—')} · {formatDateTime(b.pickupAt)}
+                      {b.bookingNumber ? `${b.bookingNumber} · ` : ''}{b.tripType?.replace(/_/g,' ')} · {titleCase(b.vehicleClass || '—')} · {formatDateTime(b.pickupAt)}
                     </p>
                   </div>
                   <div className="text-right shrink-0 ml-4">
@@ -302,6 +382,17 @@ export default function CustomerDetail() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+          {bookingPages > 1 && (
+            <div className="flex items-center justify-between px-5 py-3" style={{ borderTop: '1px solid #F3F4F6' }}>
+              <span className="text-xs" style={{ color: '#6B7280' }}>
+                Page {bookingPage} of {bookingPages}{bookingMeta.total != null ? ` · ${bookingMeta.total} bookings` : ''}
+              </span>
+              <div className="flex gap-2">
+                <Button size="sm" variant="secondary" disabled={bookingPage <= 1} onClick={() => setBookingPage((p) => p - 1)}>Previous</Button>
+                <Button size="sm" variant="secondary" disabled={bookingPage >= bookingPages} onClick={() => setBookingPage((p) => p + 1)}>Next</Button>
+              </div>
             </div>
           )}
         </Card>

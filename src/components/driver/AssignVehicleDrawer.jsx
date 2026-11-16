@@ -5,6 +5,7 @@ import Select from '../ui/Select';
 import Button from '../ui/Button';
 import Alert from '../ui/Alert';
 import { vehicleService, vehicleCatalogService } from '../../services';
+import { classKey } from '../../utils/vehicleClass';
 
 /**
  * Assign a vehicle to a driver -- from the vehicles that ALREADY EXIST in the
@@ -48,7 +49,7 @@ export default function AssignVehicleDrawer({ open, onClose, onSubmit, driver })
         ]);
         if (cancelled) return;
         const classNames = catalogue && catalogue.length
-          ? new Map(catalogue.map((c) => [c.key, c.name || c.key]))
+          ? new Map(catalogue.map((c) => [classKey(c.key), c.name || c.key])) // keyed case-insensitively
           : null;
         setFleet({ status: 'ready', vehicles, classNames, error: '' });
       } catch (e) {
@@ -60,13 +61,13 @@ export default function AssignVehicleDrawer({ open, onClose, onSubmit, driver })
 
   const { options, hidden } = useMemo(() => {
     const inService = fleet.vehicles.filter((v) => v.isActive !== false && !OUT_OF_SERVICE.includes(v.status));
-    const classOk = (v) => !fleet.classNames || fleet.classNames.has(v.vehicleClass);
+    const classOk = (v) => !fleet.classNames || fleet.classNames.has(classKey(v.vehicleClass));
     return {
       options: inService.filter(classOk).sort(byReg).map((v) => ({
         value: v.id,
         label: [
           v.registrationNumber,
-          fleet.classNames?.get(v.vehicleClass) || v.vehicleClass,
+          fleet.classNames?.get(classKey(v.vehicleClass)) || v.vehicleClass,
           v.seatingCapacity ? `${v.seatingCapacity} seats` : null,
         ].filter(Boolean).join(' \u00b7 '),
       })),

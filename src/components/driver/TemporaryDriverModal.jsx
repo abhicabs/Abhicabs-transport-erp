@@ -6,12 +6,12 @@ import Select from '../ui/Select';
 import Button from '../ui/Button';
 import Alert from '../ui/Alert';
 import { useForm } from '../../hooks/useForm';
-import { required, isEmail, isPhone } from '../../utils/validators';
+import { required, isPhone } from '../../utils/validators';
 import { cleanPhoneInput, parseIndianMobile } from '../../utils/phone';
 import { vehicleCatalogService } from '../../services';
 
 /**
- * Add a temporary (hired) driver: name, mobile, email, and the vehicle they will
+ * Add a temporary (hired) driver: name, mobile, and the vehicle they will
  * use (registration number + class). Assigning a vehicle to an EXISTING driver is
  * a separate screen, AssignVehicleDrawer, which only offers vehicles already in
  * the fleet.
@@ -67,7 +67,6 @@ export default function TemporaryDriverModal({ open, onClose, onSubmit }) {
       await onSubmit({
         name: vals.name.trim(),
         mobile: parseIndianMobile(vals.mobile) || vals.mobile.trim(),
-        ...(vals.email.trim() && { email: vals.email.trim().toLowerCase() }),
         vehicleNumber: vals.vehicleNumber.trim().toUpperCase().replace(/\s+/g, ''),
         vehicleClass: vals.vehicleClass,
         ...(seatsFor(vals.vehicleClass) && { seatingCapacity: seatsFor(vals.vehicleClass) }),
@@ -105,11 +104,8 @@ export default function TemporaryDriverModal({ open, onClose, onSubmit }) {
                 onBlur={() => setFieldTouched('mobile')} placeholder="e.g. 9876543210" />
             </FormField>
           </div>
-          <FormField label="Email (optional)" error={touched.email && errors.email}
-            hint="If provided, they can sign in with email OTP.">
-            <Input type="email" value={values.email} onChange={(e) => setValue('email', e.target.value)}
-              onBlur={() => setFieldTouched('email')} placeholder="driver@example.com" />
-          </FormField>
+          {/* Email field removed: the backend has no email sign-in and ignored it
+              (a temporary driver gets a placeholder address). Their mobile is what identifies them. */}
           <div className="grid grid-cols-2 gap-3">
             <FormField label="Vehicle number" required error={touched.vehicleNumber && errors.vehicleNumber}
               hint="The registration number of the car this driver will use.">

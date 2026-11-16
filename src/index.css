@@ -247,3 +247,28 @@ table { max-width: 100%; }
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* ── Dashboard ─────────────────────────────────────────────────────────── */
+@layer components {
+  .dashboard .attention-item:hover { border-color: #C9C9C3; }
+  .dashboard .attention-item:focus-visible,
+  .dashboard .pickup-chip:focus-visible { outline: 2px solid #111111; outline-offset: 2px; }
+  .dashboard .pickup-chip:hover { filter: brightness(0.97); }
+  /* 30-day strip: hairline dividers between the stats, in 2 or 4 columns */
+  .dashboard .month-strip > * + * { border-left: 1px solid #EFEFEA; }
+  @media (max-width: 1023px) {
+    .dashboard .month-strip > :nth-child(3) { border-left: 0; }
+    .dashboard .month-strip > :nth-child(n + 3) { border-top: 1px solid #EFEFEA; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dashboard * { transition: none !important; }
+  }
+}
+
+/* Dashboard header text colours (kept as classes so the page can be re-themed in one place). */
+@layer components {
+  .dashboard .dash-title   { color: #111111; }
+  .dashboard .dash-sub     { color: #6B7280; }
+  .dashboard .dash-section { color: #111111; }
+  .dashboard .dash-clear   { color: #166534; background: #DCFCE7; }
+}

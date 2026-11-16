@@ -178,10 +178,10 @@ function SidebarBody({ items, badges, collapsed, onToggleCollapse, onCloseMobile
 
 export default function Sidebar({ nav, mobileOpen, onCloseMobile, collapsed = false, onToggleCollapse }) {
   const { hasPermission } = useAuth();
-  const { newRequestCount } = useAdminRealtimeContext();
+  const { newRequestCount, handoffCount } = useAdminRealtimeContext();
   const items = nav.filter((item) => hasPermission(item.permission));
   // Live counts shown next to a nav item.
-  const badges = { '/admin/booking-requests': newRequestCount };
+  const badges = { '/admin/booking-requests': newRequestCount, '/admin/whatsapp': handoffCount };
 
   return (
     <>

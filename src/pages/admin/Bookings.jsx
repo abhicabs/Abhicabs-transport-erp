@@ -60,6 +60,13 @@ export default function Bookings() {
   // row isn't on the current page or passes the active filter, then strip the
   // param so a refresh or closing the modal doesn't reopen it.
   const [searchParams, setSearchParams] = useSearchParams();
+  // /admin/bookings?new=1 (the dashboard's "New booking") opens the form straight away.
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return;
+    setFormOpen(true);
+    const next = new URLSearchParams(searchParams); next.delete('new'); setSearchParams(next, { replace: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
   const confirmId = searchParams.get('confirm');
   const deepLinkHandled = useRef(false);
 

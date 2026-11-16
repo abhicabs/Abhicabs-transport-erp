@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Star, PlusCircle, UserPlus, Phone, Mail, IdCard, CheckCircle, XCircle, Eye, FileText, Image, X, AlertTriangle } from 'lucide-react';
 import PageHeader    from '../../components/ui/PageHeader';
 import PageTabs from '../../components/ui/PageTabs';
@@ -165,6 +166,7 @@ function DocumentReviewModal({ driver, onClose, onApprove, onReject, actionLoadi
 // ── Roster tab ──────────────────────────────────────────────────────────────
 function RosterTab() {
   const toast = useToast();
+  const navigate = useNavigate();
   // Server-side filters: status (online|offline), kycStatus, search, sortBy, order
   const list  = useResourceList(driverService, {
     filterDefaults: { status: '', kycStatus: '' },
@@ -245,7 +247,7 @@ function RosterTab() {
       key: 'name', header: 'Driver',
       render: (r) => (
         <div>
-          <p style={{ fontWeight: 600, color: '#1F2937' }}>{r.user?.name}</p>
+          <p style={{ fontWeight: 600, color: '#3B65DB' }} className="hover:underline">{r.user?.name}</p>
           <p style={{ fontSize: 13.5, color: '#6B7280' }} className="flex items-center gap-1"><Phone size={11} />{r.user?.phone}</p>
         </div>
       ),
@@ -309,7 +311,8 @@ function RosterTab() {
       // different widths pushed Edit / Deactivate to a different x on every row.
       key: 'actions', header: 'Actions',
       render: (r) => (
-        <div style={{ display: 'grid', gridTemplateColumns: '128px 60px 96px', gap: 8, alignItems: 'center' }}>
+        // stopPropagation: clicks on these buttons must not also open the driver page.
+        <div style={{ display: 'grid', gridTemplateColumns: '128px 60px 96px', gap: 8, alignItems: 'center' }} onClick={(e) => e.stopPropagation()}>
           {/* A vehicle is optional at registration for EVERY driver type, so
               admin can assign one directly to whoever doesn't have one yet. */}
           {hasVehicle(r)
@@ -348,6 +351,7 @@ function RosterTab() {
         ]}
       />
       <DataTable columns={columns} rows={list.rows} rowKey="userId" status={list.status} error={list.error} onRetry={list.refetch}
+        onRowClick={(r) => navigate(`/admin/drivers/${r.userId}`)}
         sortBy={list.sortBy} sortDir={list.sortDir} onSort={list.onSort}
         page={list.page} limit={list.meta?.limit} total={list.meta?.total} totalPages={list.meta?.totalPages} onPageChange={list.setPage}
         onLimitChange={list.setLimit}
@@ -429,6 +433,7 @@ function KycTab() {
 
 // ── Performance tab ──────────────────────────────────────────────────────────
 function PerformanceTab() {
+  const navigate = useNavigate();
   const [customRange, setCustomRange] = useState(null); // { from, to } | null
   const [sortBy,  setSortBy]  = useState('completedTrips');
   const [minRate, setMinRate] = useState('');
@@ -476,7 +481,8 @@ function PerformanceTab() {
           options={['50','70','80','90'].map((v) => ({ value: v, label: `≥ ${v}% acceptance` }))} />
       </div>
       <Alert type="info" className="mb-4">Activity-based data. Drivers with no trips in this period won't appear.</Alert>
-      <DataTable columns={columns} rows={filtered} status={status} error={error} onRetry={refetch} emptyTitle="No driver activity" emptyDescription="No trips in this period. Try a wider date range." />
+      <DataTable columns={columns} rows={filtered} status={status} error={error} onRetry={refetch}
+        onRowClick={(r) => r.driverId && navigate(`/admin/drivers/${r.driverId}`)} emptyTitle="No driver activity" emptyDescription="No trips in this period. Try a wider date range." />
     </div>
   );
 }

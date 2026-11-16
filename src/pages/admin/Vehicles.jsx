@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Plus, Pencil, Trash2, Users, AlertTriangle, CheckCircle, Clock, Shield, XCircle, Eye, FileText, RotateCcw, PowerOff } from 'lucide-react';
 import PageHeader    from '../../components/ui/PageHeader';
 import Button        from '../../components/ui/Button';
@@ -207,6 +208,7 @@ function PendingVehicleModal({ vehicle, onClose, onSetOperationalStatus, actionL
 
 // ── Fleet tab ─────────────────────────────────────────────────────────────────
 function FleetTab({ canManage, canDelete }) {
+  const navigate = useNavigate();
   const toast = useToast();
   // Server-side filters: status, vehicleClass, search, sortBy, order
   const list  = useResourceList(vehicleService, {
@@ -270,7 +272,7 @@ function FleetTab({ canManage, canDelete }) {
     // fleet list — the backend exposes no verification field here, so it only
     // ever showed a dead placeholder while widening the table enough to push the
     // row actions (including Delete) off-screen behind horizontal scroll.
-    ...(canManage ? [{ key: 'actions', header: '', className: 'text-right', render: (r) => (<div className="flex justify-end gap-1"><IconButton icon={Shield} label="Docs" onClick={(e) => { e.stopPropagation(); openDocs(r); }} disabled={detailLoading === r.id} /><IconButton icon={Pencil} label="Edit" onClick={() => openEdit(r)} disabled={detailLoading === r.id} />{r.isActive === false || r.status === 'INACTIVE'
+    ...(canManage ? [{ key: 'actions', header: '', className: 'text-right', render: (r) => (<div className="flex justify-end gap-1" onClick={(e) => e.stopPropagation()}><IconButton icon={Shield} label="Docs" onClick={(e) => { e.stopPropagation(); openDocs(r); }} disabled={detailLoading === r.id} /><IconButton icon={Pencil} label="Edit" onClick={() => openEdit(r)} disabled={detailLoading === r.id} />{r.isActive === false || r.status === 'INACTIVE'
             ? <IconButton icon={RotateCcw} label="Activate" onClick={() => handleActivate(r)} />
             : <IconButton icon={PowerOff} label="Deactivate" onClick={() => setDeleting(r)} />}
             {/* Delete is now visible to every fleet manager, not just admins.
@@ -381,6 +383,7 @@ function FleetTab({ canManage, canDelete }) {
         ]}
       />
       <DataTable columns={columns} rows={list.rows} status={list.status} error={list.error} onRetry={list.refetch}
+        onRowClick={(r) => navigate(`/admin/vehicles/${r.id}`)}
         sortBy={list.sortBy} sortDir={list.sortDir} onSort={list.onSort}
         page={list.page} limit={list.meta?.limit} total={list.meta?.total} totalPages={list.meta?.totalPages} onPageChange={list.setPage}
         onLimitChange={list.setLimit}

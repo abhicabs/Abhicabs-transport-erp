@@ -1,118 +1,124 @@
 /**
- * src/pages/admin/Dashboard.jsx
+ * src/pages/admin/Dashboard.jsx — the operations home screen.
  *
- * FIXES:
- * 1. HOISTING BUG — `bookingsWeekly` used `executiveApi.data` inside useMemo
- *    but was declared BEFORE executiveApi (which is declared after). In JS,
- *    `const` is not hoisted so `executiveApi` was undefined when `bookingsWeekly`
- *    ran on first render, crashing with "Cannot read properties of undefined".
- *    Fixed by moving `bookingsWeekly` below the `executiveApi` declaration.
+ * Built around one question: what needs someone right now?
+ *   1. Needs attention — every queue that is waiting on staff, one tap away.
+ *   2. Next 12 hours   — every pickup on a time track, coloured by readiness.
+ *   3. Last 30 days    — the business numbers, kept to one quiet strip.
+ *   4. Trend + fleet, then recent bookings and the live activity feed.
  *
- * 2. WRONG exec SHAPE — reportsService.executive() returns a flat object:
- *    { totalBookings, completedBookings, cancelledBookings, totalRevenue, ... }
- *    Dashboard was reading `exec.volume?.totalBookings` and `exec.cash?.collected`
- *    (nested shape from an older spec) — both returned undefined, so KPI cards
- *    showed 0 and the bar chart was empty even with real data. Fixed to read
- *    the actual flat fields from the backend response.
- *
- * 3. WRONG fleet SHAPE — reportsService.fleet() returns an array from the mock
- *    and `{ fleet: { byStatus, total, utilisation } }` from the real backend.
- *    The old code did `const fleet = fleetRaw?.fleet || fleetRaw` then
- *    `fleet.byStatus` — but the mock returns an array, so `fleet.byStatus`
- *    was undefined and the DonutChart rendered nothing. Fixed to handle both.
- *
- * 4. LOADING before executiveApi is in scope — the loading guard read
- *    `executiveApi.status` before executiveApi was declared (same hoisting
- *    issue). Moved the `loading` computation below all useApi declarations.
+ * Data: the same report endpoints as before (executive, fleet, business-trend),
+ * the staff booking list (which now carries each trip's current allocation),
+ * and the live counts the realtime context already keeps (dispatch reminder,
+ * WhatsApp handoffs, booking requests).
  */
 import { useMemo, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Truck, CalendarCheck, IndianRupee, Radio, Zap, AlertTriangle } from 'lucide-react';
-import PageHeader   from '../../components/ui/PageHeader';
+import {
+  PhoneCall, Truck, ClipboardCheck, Inbox, IdCard, CheckCircle2, PlusCircle, LayoutGrid, RefreshCw,
+} from 'lucide-react';
 import Card         from '../../components/ui/Card';
-import KpiCard      from '../../components/dashboard/KpiCard';
-import BarChart     from '../../components/dashboard/BarChart';
+import Button       from '../../components/ui/Button';
+import TrendChart   from '../../components/dashboard/TrendChart';
+import ChannelMix   from '../../components/dashboard/ChannelMix';
+import PeakHeatmap  from '../../components/dashboard/PeakHeatmap';
 import DonutChart   from '../../components/dashboard/DonutChart';
+import PickupBoard, { READINESS, readinessOf } from '../../components/dashboard/PickupBoard';
 import StatusBadge  from '../../components/ui/StatusBadge';
-import { useApi }   from '../../hooks/useApi';
-import { useAdminRealtimeContext } from '../../context/AdminRealtimeContext';
-import { bookingService, reportsService, contactService, bookingOpsService } from '../../services';
-import { apiClient } from '../../services/apiClient';
 import { CardSkeleton } from '../../components/ui/Skeleton';
 import ErrorState   from '../../components/ui/ErrorState';
+import { useApi }   from '../../hooks/useApi';
+import { useAuth }  from '../../hooks/useAuth';
+import { useAdminRealtimeContext } from '../../context/AdminRealtimeContext';
+import { bookingService, reportsService, bookingOpsService } from '../../services';
+import { apiClient } from '../../services/apiClient';
 import { formatCurrency, formatDateTime, titleCase } from '../../utils/formatters';
 import { attemptWho, attemptState, ATTEMPT_LABEL } from '../../utils/attemptDetails';
 
-
-// FIX: the bookings chart used to be entirely fabricated — it took the
-// 30-day total, divided by 30 for a daily "average", then multiplied by
-// made-up weighting factors ([0.9, 1.1, 1.0, ...]) with no relationship to
-// any real day. The backend already has a genuine per-day endpoint
-// (GET /admin/reports/business-trend, confirmed real: date_trunc('day', ...)
-// grouped booking/revenue counts) — this now uses that instead, and
-// aggregates it client-side into Daily / Weekly / Monthly buckets.
+// ── Trend buckets ─────────────────────────────────────────────────────────
+// Each period is compared with the one before it of the same length:
+// last 7 days vs the 7 before, last 8 weeks vs the 8 before, last 6 months
+// vs the 6 before. Buckets are built here (UTC days, matching the backend's
+// date_trunc) so days with no bookings still show as zero.
 const PERIODS = [
-  { key: 'daily',   label: 'Daily',   days: 7   },
-  { key: 'weekly',  label: 'Weekly',  days: 56  }, // ~8 weeks
-  { key: 'monthly', label: 'Monthly', days: 180 }, // ~6 months
+  { key: 'daily',   label: '7 days'   },
+  { key: 'weekly',  label: '8 weeks'  },
+  { key: 'monthly', label: '6 months' },
 ];
+const DAY_MS = 86400000;
 
-function aggregateTrend(rows, period) {
-  if (!rows?.length) return [];
-  if (period === 'daily') {
-    return rows.slice(-7).map((r) => ({
-      label: new Date(r.date || r.day).toLocaleDateString('en-IN', { weekday: 'short' }),
-      value: Number(r.bookings) || 0,
-    }));
-  }
-  if (period === 'weekly') {
-    const buckets = new Map(); // isoWeekStart -> total
-    for (const r of rows) {
-      const d = new Date(r.date || r.day);
-      const weekStart = new Date(d);
-      weekStart.setDate(d.getDate() - d.getDay()); // Sunday-start bucket, simple + consistent
-      const key = weekStart.toISOString().slice(0, 10);
-      buckets.set(key, (buckets.get(key) || 0) + (Number(r.bookings) || 0));
+function buildBuckets(period, now = new Date()) {
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const cur = []; const prev = [];
+  if (period === 'monthly') {
+    for (let i = 11; i >= 0; i -= 1) {
+      const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - i, 1));
+      const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1));
+      (i >= 6 ? prev : cur).push({ start, end, label: start.toLocaleDateString('en-IN', { month: 'short', timeZone: 'UTC' }) });
     }
-    return [...buckets.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .slice(-8)
-      .map(([key, value]) => ({
-        label: new Date(key).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
-        value,
-      }));
+  } else {
+    const size = period === 'daily' ? 1 : 7;
+    const n = period === 'daily' ? 7 : 8;
+    for (let i = 2 * n - 1; i >= 0; i -= 1) {
+      const end = new Date(today.getTime() + DAY_MS - i * size * DAY_MS);
+      const start = new Date(end.getTime() - size * DAY_MS);
+      const label = period === 'daily'
+        ? start.toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'UTC' })
+        : start.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+      (i >= n ? prev : cur).push({ start, end, label });
+    }
   }
-  // monthly
-  const buckets = new Map(); // "YYYY-MM" -> total
-  for (const r of rows) {
-    const d = new Date(r.date || r.day);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    buckets.set(key, (buckets.get(key) || 0) + (Number(r.bookings) || 0));
-  }
-  return [...buckets.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .slice(-6)
-    .map(([key, value]) => {
-      const [y, m] = key.split('-');
-      return { label: new Date(Number(y), Number(m) - 1, 1).toLocaleDateString('en-IN', { month: 'short' }), value };
-    });
+  return { cur, prev, from: prev[0].start, to: new Date(now.getTime() + 60000) };
+}
+
+function sumInto(buckets, series, key) {
+  return buckets.map((b) => series.reduce((s, r) => {
+    const t = new Date(r.day || r.date).getTime();
+    return t >= b.start.getTime() && t < b.end.getTime() ? s + (Number(r[key]) || 0) : s;
+  }, 0));
+}
+
+/** ₹ in Indian short form for axes: ₹950, ₹12k, ₹3.4L, ₹1.2Cr */
+function inrShort(n) {
+  const v = Math.round(Number(n) || 0);
+  if (v >= 1e7) return `₹${(v / 1e7).toFixed(v >= 1e8 ? 0 : 1)}Cr`;
+  if (v >= 1e5) return `₹${(v / 1e5).toFixed(v >= 1e6 ? 0 : 1)}L`;
+  if (v >= 1e3) return `₹${Math.round(v / 1e3)}k`;
+  return `₹${v}`;
+}
+
+function ChangeChip({ now, before }) {
+  if (!before) return null;
+  const pct = Math.round(((now - before) / before) * 100);
+  const up = pct >= 0;
+  return (
+    <span className="text-xs font-bold rounded-full px-2 py-0.5"
+      style={{ backgroundColor: up ? '#DCFCE7' : '#FEE2E2', color: up ? '#166534' : '#991B1B' }}
+      title="Compared with the previous period of the same length">
+      {up ? '▲' : '▼'} {Math.abs(pct)}% vs previous
+    </span>
+  );
 }
 
 const FEED_LABEL = {
-  'booking:created':   { text: 'New booking',       color: '#166534', bg: '#f0fdf4' },
-  'booking:attempted': { text: 'Booking attempt',   color: '#6B7280', bg: '#F7F8FC' },
-  'admin:alert':       { text: 'Attempt failed',    color: '#991B1B', bg: '#fef2f2' },
-  'trip:status':       { text: 'Status changed',    color: '#1e3a8a', bg: '#eef2fb' },
-  'booking:allocated': { text: 'Vehicle allocated', color: '#7c3aed', bg: '#f5f3ff' },
-  'payment:received':  { text: 'Payment received',  color: '#166534', bg: '#f0fdf4' },
+  'booking:created':     { text: 'New booking',        color: '#166534', bg: '#DCFCE7' },
+  'booking:attempted':   { text: 'Booking attempt',    color: '#4B5563', bg: '#F3F4F6' },
+  'admin:alert':         { text: 'Attempt failed',     color: '#991B1B', bg: '#FEE2E2' },
+  'trip:status':         { text: 'Status changed',     color: '#1E3A8A', bg: '#DBEAFE' },
+  'booking:allocated':   { text: 'Vehicle assigned',   color: '#5B21B6', bg: '#EDE9FE' },
+  'payment:received':    { text: 'Payment received',   color: '#166534', bg: '#DCFCE7' },
+  'whatsapp:handoff':    { text: 'WhatsApp: needs a person', color: '#9A3412', bg: '#FFEDD5' },
+  'dispatch:unassigned': { text: 'Dispatch reminder',  color: '#991B1B', bg: '#FEE2E2' },
+  'booking_request:created': { text: 'Booking request', color: '#1E3A8A', bg: '#DBEAFE' },
+  'booking:abandoned':   { text: 'Abandoned checkout', color: '#92400E', bg: '#FEF3C7' },
 };
 
-// Backend returns address as { address: "..." } object or a plain string
 function addr(val) {
-  if (!val) return '—';
+  if (!val) return '';
   if (typeof val === 'string') return val;
-  return val.address || val.formattedAddress || '—';
+  return val.address || val.formattedAddress || '';
 }
+const placeName = (v) => addr(v).split(',')[0].trim() || '—';
 
 function last30Days() {
   const to   = new Date();
@@ -120,104 +126,156 @@ function last30Days() {
   return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
 }
 
+function greeting(d = new Date()) {
+  const h = d.getHours();
+  return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+}
+
+const totalOf = (res) => res?.meta?.total ?? res?.pagination?.total ?? 0;
+
+/** One queue that is waiting on staff. Quiet when empty, loud when not. */
+function AttentionItem({ icon: Icon, count, label, hint, tone, onClick }) {
+  const active = count > 0;
+  const tones = {
+    red:    { fg: '#991B1B', bg: '#FEF2F2', border: '#FECACA' },
+    orange: { fg: '#9A3412', bg: '#FFF7ED', border: '#FED7AA' },
+    violet: { fg: '#5B21B6', bg: '#F5F3FF', border: '#DDD6FE' },
+    blue:   { fg: '#1E3A8A', bg: '#EFF6FF', border: '#BFDBFE' },
+    amber:  { fg: '#92400E', bg: '#FFFBEB', border: '#FDE68A' },
+  };
+  const t = tones[tone];
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="attention-item text-left rounded-xl px-4 py-3 border transition-colors"
+      style={{
+        backgroundColor: active ? t.bg : '#FFFFFF',
+        borderColor: active ? t.border : '#E8E8E4',
+        color: active ? t.fg : '#6B7280',
+        minWidth: 0,
+      }}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <Icon size={18} aria-hidden="true" />
+        <span style={{ fontSize: 26, fontWeight: 800, lineHeight: 1, fontVariantNumeric: 'tabular-nums', color: active ? t.fg : '#C4C4BE' }}>
+          {count}
+        </span>
+      </div>
+      <p className="mt-2 text-sm font-semibold" style={{ color: active ? t.fg : '#374151' }}>{label}</p>
+      <p className="text-xs" style={{ color: active ? t.fg : '#9CA3AF', opacity: active ? 0.85 : 1 }}>{hint}</p>
+    </button>
+  );
+}
+
+function Stat({ label, value, sub }) {
+  return (
+    <div className="px-5 py-4" style={{ minWidth: 0 }}>
+      <p className="text-xs" style={{ color: '#6B7280' }}>{label}</p>
+      <p className="text-2xl font-extrabold mt-0.5" style={{ color: '#111', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>{value}</p>
+      {sub && <p className="text-xs mt-0.5" style={{ color: '#9CA3AF' }}>{sub}</p>}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { connected, feed, lastBookingEventId } = useAdminRealtimeContext();
+  const { user } = useAuth();
+  const {
+    feed, lastBookingEventId,
+    unassignedSoon = [], handoffCount = 0, newRequestCount = 0,
+  } = useAdminRealtimeContext();
   const range = useMemo(() => last30Days(), []);
+  const [now, setNow] = useState(Date.now());
 
-  // ── FIX 1: declare ALL useApi calls before any useMemo that reads their data ──
+  // Keep the "now" line and the pickup window moving.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(t);
+  }, []);
 
-  // Real backend reports
   const executiveApi = useApi(() => reportsService.executive(range), []);
   const fleetApi     = useApi(() => reportsService.fleet(range), []);
+  const recentApi    = useApi(() => bookingService.list({ page: 1, limit: 6, sortBy: 'createdAt', order: 'desc' }), []);
+  const pendingApi   = useApi(() => bookingService.list({ status: 'PENDING', page: 1, limit: 1 }), []);
+  const kycApi       = useApi(() => apiClient.get('/admin/drivers', { params: { kycStatus: 'PENDING', submitted: true, limit: 1, page: 1 } }), []);
+  const attemptsApi  = useApi(() => bookingOpsService.attempts({ limit: 5, page: 1 }), []);
 
-  // Recent bookings — GET /admin/bookings?page=1&limit=6&sortBy=createdAt
-  const { data: bookingsData, status, error, refetch } = useApi(
-    () => bookingService.list({ page: 1, limit: 6, sortBy: 'createdAt', order: 'desc' }),
-    []
-  );
+  // Every pickup from an hour ago to 12 hours ahead, for the board.
+  const [boardTick, setBoardTick] = useState(0);
+  const upcomingApi = useApi(() => bookingService.list({
+    from: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    to: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
+    sortBy: 'pickupAt', order: 'asc', page: 1, limit: 100,
+  }), [boardTick]);
 
-  // Pending KYC applications count — GET /admin/drivers?kycStatus=PENDING&limit=1
-  const { data: pendingKycData } = useApi(
-    () => apiClient.get('/admin/drivers', { params: { kycStatus: 'PENDING', limit: 1, page: 1 } }),
-    []
-  );
-
-  // ── FIX 2: compute loading AFTER all useApi calls ──
-  const loading =
-    status === 'loading' ||
-    executiveApi.status === 'loading' ||
-    fleetApi.status === 'loading';
-
-  // ── FIX 3: read the FLAT executive report shape ──
-  // reportsService.executive() returns:
-  // Backend returns nested: { volume: { totalBookings }, cash: { collected: "12345.00" } }
-  // Mock returns flat: { totalBookings, totalRevenue }
-  // Handle both, and Number() the string money values
-  const exec = executiveApi.data || {};
-  const totalBookings   = Number(exec.volume?.totalBookings ?? exec.totalBookings ?? 0);
-  const totalRevenue    = Number(exec.cash?.collected ?? exec.totalRevenue ?? 0);
-
-  // ── FIX 4: handle both real backend shape and mock array shape for fleet ──
-  // Real backend: { fleet: { total, utilisation, byStatus: { AVAILABLE: N, ... } } }
-  // Mock:         array of { type, count, onTrip }
-  const fleetRaw = fleetApi.data;
-  const fleetObj = Array.isArray(fleetRaw)
-    ? null  // mock — build byStatus from array
-    : (fleetRaw?.fleet || fleetRaw || null);
-
-  const fleetTotal = fleetObj?.total ?? 0;
-
-  const fleetStatus = useMemo(() => {
-    if (fleetObj?.byStatus) {
-      return Object.entries(fleetObj.byStatus).map(([label, value]) => ({
-        label: titleCase(label), value,
-      }));
-    }
-    if (Array.isArray(fleetRaw)) {
-      // Mock array: [{ type, count, onTrip }, ...]
-      return fleetRaw.map((v) => ({ label: titleCase(v.type || 'Unknown'), value: v.count || 0 }));
-    }
-    return [];
-  }, [fleetRaw, fleetObj]);
-
-  // ── FIX 1 cont: real per-day trend data, not a fabricated weekly shape ──
+  // Trends: one period switch drives both the bookings and revenue charts.
   const [chartPeriod, setChartPeriod] = useState('daily');
-  const periodDays = PERIODS.find((p) => p.key === chartPeriod)?.days || 7;
-  const trendApi = useApi(    () => reportsService.businessTrend({
-      from: new Date(Date.now() - periodDays * 86400000).toISOString(),
-      to: new Date().toISOString(),
-    }),
-    [chartPeriod]
-  );
-  const bookingsChartData = useMemo(
-    () => aggregateTrend(trendApi.data?.series || trendApi.data || [], chartPeriod),
-    [trendApi.data, chartPeriod]
-  );
+  const buckets = useMemo(() => buildBuckets(chartPeriod), [chartPeriod]);
+  const trendApi = useApi(() => apiClient.get('/admin/reports/business-trend', {
+    params: { from: buckets.from.toISOString(), to: buckets.to.toISOString() },
+  }), [chartPeriod]);
+  const trend = useMemo(() => {
+    const series = trendApi.data?.series || (Array.isArray(trendApi.data) ? trendApi.data : []);
+    const cb = sumInto(buckets.cur, series, 'bookings');
+    const pb = sumInto(buckets.prev, series, 'bookings');
+    const cr = sumInto(buckets.cur, series, 'revenue');
+    const pr = sumInto(buckets.prev, series, 'revenue');
+    const sum = (a) => a.reduce((s, v) => s + v, 0);
+    return {
+      bookings: buckets.cur.map((b, i) => ({ label: b.label, value: cb[i], prev: pb[i] })),
+      revenue: buckets.cur.map((b, i) => ({ label: b.label, value: cr[i], prev: pr[i] })),
+      totals: { b: sum(cb), pb: sum(pb), r: sum(cr), pr: sum(pr) },
+    };
+  }, [trendApi.data, buckets]);
 
-  // Booking-attempt tracking — real funnel data from
-  // GET /admin/bookings/attempts (fed by the customer website's draft tracking).
-  // We DON'T filter to ABANDONED: drafts are stored as PENDING and only become
-  // ABANDONED after ~30 min via the backend worker, so filtering to ABANDONED
-  // alone showed nothing. Showing all recent attempts surfaces the data live.
-  const abandonedApi = useApi(
-    () => bookingOpsService.attempts({ limit: 5, page: 1 }),
-    []
-  );
-  const abandonedCount = abandonedApi.data?.pagination?.total ?? 0;
-  const abandonedRecent = abandonedApi.data?.items ?? [];
+  // Where bookings come from (last 30 days) and when trips run (last 8 weeks).
+  const channelsApi = useApi(() => apiClient.get('/admin/reports/channels', { params: range }), []);
+  const peakApi = useApi(() => apiClient.get('/admin/reports/peak-hours', {
+    params: { from: new Date(Date.now() - 56 * DAY_MS).toISOString(), to: new Date().toISOString() },
+  }), []);
 
-  const pendingKycCount = pendingKycData?.pagination?.total ?? pendingKycData?.meta?.total ?? 0;
+  const refreshAll = () => {
+    recentApi.refetch(); executiveApi.refetch(); fleetApi.refetch(); trendApi.refetch();
+    pendingApi.refetch(); kycApi.refetch(); attemptsApi.refetch(); setBoardTick((t) => t + 1);
+    channelsApi.refetch(); peakApi.refetch();
+  };
 
-  // Refetch everything when a new booking arrives via socket
+  // A new booking arrived on the live connection: refresh what it affects.
   useEffect(() => {
     if (!lastBookingEventId) return;
-    refetch();
-    executiveApi.refetch();
-    fleetApi.refetch();
-    trendApi.refetch();
+    recentApi.refetch(); executiveApi.refetch(); pendingApi.refetch(); setBoardTick((t) => t + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastBookingEventId]);
+  // And the board every 2 minutes, so assignments made elsewhere show up.
+  useEffect(() => {
+    const t = setInterval(() => setBoardTick((x) => x + 1), 120000);
+    return () => clearInterval(t);
+  }, []);
 
+  // Fleet: real backend { fleet: { total, byStatus } } or the mock's array.
+  const fleetRaw = fleetApi.data;
+  const fleetObj = Array.isArray(fleetRaw) ? null : (fleetRaw?.fleet || fleetRaw || null);
+  const fleetTotal = fleetObj?.total ?? 0;
+  const fleetStatus = useMemo(() => {
+    if (fleetObj?.byStatus) return Object.entries(fleetObj.byStatus).map(([label, value]) => ({ label: titleCase(label), value }));
+    if (Array.isArray(fleetRaw)) return fleetRaw.map((v) => ({ label: titleCase(v.type || 'Unknown'), value: v.count || 0 }));
+    return [];
+  }, [fleetRaw, fleetObj]);
+  const onTrip = Number(fleetObj?.byStatus?.ON_TRIP || 0) + Number(fleetObj?.byStatus?.ASSIGNED || 0);
+
+  const upcoming = useMemo(() => upcomingApi.data?.data ?? upcomingApi.data?.items ?? [], [upcomingApi.data]);
+  const readyCounts = useMemo(() => {
+    const c = {};
+    for (const b of upcoming) {
+      if (['CANCELLED', 'EXPIRED', 'COMPLETED'].includes(b.status)) continue;
+      const k = readinessOf(b); c[k] = (c[k] || 0) + 1;
+    }
+    return c;
+  }, [upcoming]);
+  const boardBookings = useMemo(() => upcoming.filter((b) => !['CANCELLED', 'EXPIRED', 'COMPLETED'].includes(b.status)), [upcoming]);
+
+  const loading = executiveApi.status === 'loading' && recentApi.status === 'loading';
   if (loading) {
     return (
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -225,207 +283,292 @@ export default function Dashboard() {
       </div>
     );
   }
-  if (status === 'error')              return <ErrorState message={error?.message}               onRetry={refetch} />;
-  if (executiveApi.status === 'error') return <ErrorState message={executiveApi.error?.message} onRetry={executiveApi.refetch} />;
-  if (fleetApi.status === 'error')     return <ErrorState message={fleetApi.error?.message}     onRetry={fleetApi.refetch} />;
+  if (recentApi.status === 'error' && executiveApi.status === 'error') {
+    return <ErrorState message={recentApi.error?.message} onRetry={refreshAll} />;
+  }
 
-  // bookingService.list returns { data: [...], meta: {...} } via crudFactory → apiClient unwrap
-  const recentBookings = bookingsData?.data ?? bookingsData?.items ?? [];
+  const exec = executiveApi.data || {};
+  const totalBookings = Number(exec.volume?.totalBookings ?? exec.totalBookings ?? 0);
+  const completed     = Number(exec.volume?.completedBookings ?? exec.completedBookings ?? 0);
+  const totalRevenue  = Number(exec.cash?.collected ?? exec.totalRevenue ?? 0);
+  const recentBookings = recentApi.data?.data ?? recentApi.data?.items ?? [];
+  const attempts = attemptsApi.data?.items ?? [];
+  const attemptsTotal = attemptsApi.data?.pagination?.total ?? 0;
+
+  const pendingCount = totalOf(pendingApi.data);
+  const kycCount = totalOf(kycApi.data);
+  const unassignedCount = unassignedSoon.filter((u) => !u.needsConfirmation).length;
+  const attention = [
+    { key: 'confirm',  icon: ClipboardCheck, count: pendingCount,    label: 'To confirm',         hint: 'New bookings waiting',            tone: 'violet', to: '/admin/dispatch' },
+    { key: 'assign',   icon: Truck,          count: unassignedCount, label: 'Need vehicle or driver', hint: 'Pickup within 3 hours',      tone: 'red',    to: '/admin/dispatch' },
+    { key: 'whatsapp', icon: PhoneCall,      count: handoffCount,    label: 'WhatsApp waiting',   hint: 'Customers asking for a person',   tone: 'orange', to: '/admin/whatsapp?tab=conversations&filter=handoff' },
+    { key: 'requests', icon: Inbox,          count: newRequestCount, label: 'Booking requests',   hint: 'Outside service area',            tone: 'blue',   to: '/admin/booking-requests' },
+    { key: 'kyc',      icon: IdCard,         count: kycCount,        label: 'Driver KYC',         hint: 'Applications to review',          tone: 'amber',  to: '/admin/drivers' },
+  ];
+  const allClear = attention.every((a) => !a.count);
+  const today = new Date(now).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' });
+  const firstName = (user?.name || '').split(' ')[0];
 
   return (
-    <div>
-      <PageHeader
-        title="Dashboard"
-        description="Fleet operations overview — last 30 days."
-        actions={
-          <span
-            className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold"
-            style={{ backgroundColor: connected ? '#f0fdf4' : '#F7F8FC', color: connected ? '#166534' : '#9CA3AF' }}
-          >
-            <Radio size={12} /> {connected ? 'Live updates on' : 'Live updates offline'}
-          </span>
-        }
-      />
-
-      {/* ── KPI cards ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Fleet Vehicles"    value={fleetTotal}
-          icon={Truck} tone="purple" />
-        <KpiCard label="Bookings (30d)"    value={totalBookings}
-          icon={CalendarCheck} tone="blue" />
-        <KpiCard label="Revenue Collected" value={formatCurrency(totalRevenue)}
-          icon={IndianRupee} tone="green" />
-        <KpiCard label="Booking Attempts" value={abandonedCount}
-          icon={AlertTriangle} tone="amber" />
+    <div className="dashboard">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-5">
+        <div>
+          <h1 className="dash-title text-2xl font-extrabold" style={{ letterSpacing: '-0.02em' }}>
+            {greeting(new Date(now))}{firstName ? `, ${firstName}` : ''}
+          </h1>
+          <p className="dash-sub text-sm mt-0.5">{today}</p>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <Button variant="secondary" size="sm" icon={RefreshCw} onClick={refreshAll}>Refresh</Button>
+          <Button variant="secondary" size="sm" icon={LayoutGrid} onClick={() => navigate('/admin/dispatch')}>Dispatch board</Button>
+          <Button size="sm" icon={PlusCircle} onClick={() => navigate('/admin/bookings?new=1')}>New booking</Button>
+        </div>
       </div>
 
-      {/* ── Abandoned Bookings — recent ──
-          Not a live push notification (see the honesty note on the
-          customer-website checkout page for why: creating a contact
-          record triggers no real-time event on the backend at all). This
-          card just makes them visible without needing to open Support. */}
-      {abandonedRecent.length > 0 && (
-        <Card className="mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold" style={{ color: '#1F2937' }}>Recent Booking Attempts</h3>
-            <a href="/admin/reports" className="text-xs font-semibold" style={{ color: '#3B65DB' }}>View all in Reports →</a>
-          </div>
-          <div className="space-y-2">
-            {abandonedRecent.map((a) => {
-              // The signed-in customer's account, or "Guest visitor" (a guest's details are under
-              // Reports > Booking Attempts > Left details at checkout).
-              const who = attemptWho(a);
-              const name  = who.name;
-              const phone = who.phone || '';
-              const route = [a.pickupAddress, a.dropAddress].filter(Boolean).join(' → ');
-              // A draft nobody has touched for 30 minutes is Abandoned, even if the backend job has not marked it yet.
-              const oc = ATTEMPT_LABEL[attemptState(a).outcome] || a.outcome;
-              return (
-                <div key={a.id} className="flex items-start justify-between gap-3 py-2" style={{ borderBottom: '1px solid #F3F4F6' }}>
-                  <div>
-                    <p className="text-sm font-medium" style={{ color: '#1F2937' }}>{phone ? `${name} · ${phone}` : name}</p>
-                    <p className="text-xs" style={{ color: '#9CA3AF' }}>{oc ? `${oc} · ` : ''}{route || (a.payload?.stage ? `Stage: ${a.payload.stage}` : 'Booking funnel')}</p>
-                  </div>
-                  <span className="text-xs whitespace-nowrap" style={{ color: '#9CA3AF' }}>
-                    {a.createdAt ? new Date(a.createdAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </Card>
-      )}
-
-      {/* ── Pending KYC banner ── */}
-      {pendingKycCount > 0 && (
-        <div
-          className="flex items-center justify-between rounded-xl px-4 py-3 mb-5 cursor-pointer"
-          style={{ backgroundColor: '#fffbea', border: '1px solid #FCD34D' }}
-          onClick={() => navigate('/admin/drivers')}
-        >
-          <span className="text-sm font-bold" style={{ color: '#92400E' }}>
-            🔔 {pendingKycCount} driver application{pendingKycCount > 1 ? 's' : ''} pending KYC review
-          </span>
-          <span className="text-xs font-semibold" style={{ color: '#B45309' }}>Review →</span>
+      {/* Needs attention */}
+      <section aria-labelledby="attention-h" className="mb-6">
+        <div className="flex items-center justify-between mb-2">
+          <h2 id="attention-h" className="dash-section text-sm font-bold">Needs attention</h2>
+          {allClear && (
+            <span className="dash-clear inline-flex items-center gap-1 text-xs font-semibold rounded-full px-2 py-0.5">
+              <CheckCircle2 size={14} aria-hidden="true" /> All clear
+            </span>
+          )}
         </div>
-      )}
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3">
+          {attention.map((a) => (
+            <AttentionItem key={a.key} {...a} onClick={() => navigate(a.to)} />
+          ))}
+        </div>
+      </section>
 
-      {/* ── Charts ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-        <Card className="lg:col-span-2">
-          <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
-            <h3 className="text-sm font-semibold" style={{ color: '#1F2937' }}>Bookings</h3>
-            <div className="flex gap-1 p-1 rounded-lg" style={{ backgroundColor: '#F3F4F6' }}>
-              {PERIODS.map((p) => (
-                <button
-                  key={p.key}
-                  onClick={() => setChartPeriod(p.key)}
-                  style={{
-                    fontSize: 13.5, fontWeight: 600, padding: '5px 12px', borderRadius: 6, border: 'none',
-                    backgroundColor: chartPeriod === p.key ? '#FFC107' : 'transparent',
-                    color: '#111111', cursor: 'pointer',
-                  }}
-                >
-                  {p.label}
-                </button>
-              ))}
+      {/* Next 12 hours */}
+      <Card className="mb-6">
+        <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+          <div>
+            <h2 className="text-base font-bold" style={{ color: '#111' }}>Next 12 hours</h2>
+            <p className="text-xs" style={{ color: '#6B7280' }}>
+              {boardBookings.length
+                ? `${boardBookings.length} pickup${boardBookings.length > 1 ? 's' : ''}. Tap a trip to open it.`
+                : 'No pickups scheduled in the next 12 hours.'}
+            </p>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            {Object.entries(READINESS).filter(([k]) => readyCounts[k]).map(([k, r]) => (
+              <span key={k} className="text-xs font-semibold rounded-full px-2.5 py-1" style={{ backgroundColor: r.bg, color: r.fg }}>
+                {readyCounts[k]} {r.label.toLowerCase()}
+              </span>
+            ))}
+          </div>
+        </div>
+        {upcomingApi.status === 'loading' && !upcoming.length ? (
+          <div className="h-[120px] grid place-items-center text-sm" style={{ color: '#9CA3AF' }}>Loading pickups…</div>
+        ) : upcomingApi.status === 'error' ? (
+          <div className="h-[120px] grid place-items-center text-sm" style={{ color: '#DC2626' }}>Couldn't load pickups. Try Refresh.</div>
+        ) : (
+          <>
+            {/* Phones: a plain list reads better than a sideways-scrolling track. */}
+            <div className="sm:hidden">
+              {boardBookings.filter((b) => new Date(b.pickupAt).getTime() >= now - 30 * 60000).slice(0, 8).map((b) => {
+                const r = READINESS[readinessOf(b)];
+                return (
+                  <button key={b.id} type="button" onClick={() => navigate(`/admin/bookings/${b.id}`)}
+                    className="w-full flex items-center gap-3 py-2.5 text-left" style={{ borderTop: '1px solid #F3F4F6' }}>
+                    <span className="text-sm font-bold shrink-0" style={{ width: 74, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', color: '#111' }}>
+                      {new Date(b.pickupAt).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true })}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm truncate" style={{ color: '#111' }}>{placeName(b.pickupAddress)} to {placeName(b.dropAddress)}</span>
+                      <span className="block text-xs truncate" style={{ color: '#6B7280' }}>{b.bookingNumber}</span>
+                    </span>
+                    <span className="text-xs font-semibold rounded-full px-2 py-0.5 shrink-0" style={{ backgroundColor: r.bg, color: r.fg }}>{r.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="hidden sm:block">
+              <PickupBoard bookings={boardBookings} now={now} onOpen={(b) => navigate(`/admin/bookings/${b.id}`)} />
+            </div>
+          </>
+        )}
+      </Card>
+
+      {/* Last 30 days */}
+      <section aria-labelledby="month-h" className="mb-6">
+        <h2 id="month-h" className="dash-section text-sm font-bold mb-2">Last 30 days</h2>
+        <div className="grid grid-cols-2 lg:grid-cols-4 rounded-xl border bg-white month-strip" style={{ borderColor: '#E8E8E4' }}>
+          <Stat label="Bookings" value={totalBookings.toLocaleString('en-IN')} sub={completed ? `${completed.toLocaleString('en-IN')} completed` : undefined} />
+          <Stat label="Revenue collected" value={formatCurrency(totalRevenue)} />
+          <Stat label="Fleet" value={fleetTotal} sub={fleetTotal ? `${onTrip} on trips now` : undefined} />
+          <Stat label="Checkout attempts" value={attemptsTotal.toLocaleString('en-IN')} sub="Started on the website or app" />
+        </div>
+      </section>
+
+      {/* Trends */}
+      <section aria-labelledby="trends-h" className="mb-6">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+          <h2 id="trends-h" className="dash-section text-sm font-bold">Trends</h2>
+          <div role="tablist" aria-label="Period" className="flex gap-1 p-1 rounded-lg" style={{ backgroundColor: '#EDEDE8' }}>
+            {PERIODS.map((p) => (
+              <button key={p.key} role="tab" aria-selected={chartPeriod === p.key} onClick={() => setChartPeriod(p.key)}
+                style={{
+                  fontSize: 13, fontWeight: 700, padding: '5px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  backgroundColor: chartPeriod === p.key ? '#FFC107' : 'transparent', color: '#111',
+                }}>
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+          <Card className="lg:col-span-2">
+            <div className="flex items-start justify-between gap-2 flex-wrap mb-2">
+              <div>
+                <h3 className="text-base font-bold" style={{ color: '#111' }}>Bookings made</h3>
+                <p className="text-2xl font-extrabold mt-0.5" style={{ color: '#111', fontVariantNumeric: 'tabular-nums' }}>
+                  {trend.totals.b.toLocaleString('en-IN')}
+                  <span className="text-sm font-medium ml-2" style={{ color: '#6B7280' }}>in the last {PERIODS.find((p) => p.key === chartPeriod).label}</span>
+                </p>
+              </div>
+              <ChangeChip now={trend.totals.b} before={trend.totals.pb} />
+            </div>
+            {trendApi.status === 'loading' ? (
+              <div className="h-[240px] grid place-items-center text-sm" style={{ color: '#9CA3AF' }}>Loading…</div>
+            ) : trendApi.status === 'error' ? (
+              <div className="h-[240px] grid place-items-center text-sm" style={{ color: '#DC2626' }}>Couldn't load the booking trend.</div>
+            ) : (
+              <TrendChart data={trend.bookings} type="bar" valueName="Bookings" prevName="Previous period" format={(n) => Math.round(n).toLocaleString('en-IN')} />
+            )}
+          </Card>
+          <Card>
+            <h3 className="text-base font-bold mb-3" style={{ color: '#111' }}>Bookings by source</h3>
+            {channelsApi.status === 'loading' ? (
+              <div className="h-[200px] grid place-items-center text-sm" style={{ color: '#9CA3AF' }}>Loading…</div>
+            ) : channelsApi.status === 'error' ? (
+              <p className="text-sm py-6" style={{ color: '#DC2626' }}>Couldn't load booking sources.</p>
+            ) : (
+              <ChannelMix channels={channelsApi.data?.channels || []} formatMoney={(n) => formatCurrency(n)} />
+            )}
+          </Card>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+          <Card className="lg:col-span-2">
+            <div className="flex items-start justify-between gap-2 flex-wrap mb-2">
+              <div>
+                <h3 className="text-base font-bold" style={{ color: '#111' }}>Revenue from completed trips</h3>
+                <p className="text-2xl font-extrabold mt-0.5" style={{ color: '#111', fontVariantNumeric: 'tabular-nums' }}>
+                  {formatCurrency(trend.totals.r)}
+                  <span className="text-sm font-medium ml-2" style={{ color: '#6B7280' }}>in the last {PERIODS.find((p) => p.key === chartPeriod).label}</span>
+                </p>
+              </div>
+              <ChangeChip now={trend.totals.r} before={trend.totals.pr} />
+            </div>
+            {trendApi.status === 'loading' ? (
+              <div className="h-[240px] grid place-items-center text-sm" style={{ color: '#9CA3AF' }}>Loading…</div>
+            ) : trendApi.status === 'error' ? (
+              <div className="h-[240px] grid place-items-center text-sm" style={{ color: '#DC2626' }}>Couldn't load the revenue trend.</div>
+            ) : (
+              <TrendChart data={trend.revenue} type="line" valueName="Revenue" prevName="Previous period" format={inrShort} />
+            )}
+          </Card>
+          <Card>
+            <h3 className="text-base font-bold mb-4" style={{ color: '#111' }}>Fleet right now</h3>
+            {fleetStatus.length > 0
+              ? <DonutChart data={fleetStatus} size={140} />
+              : <p className="text-sm text-center py-8" style={{ color: '#9CA3AF' }}>Add vehicles to see the fleet here.</p>}
+          </Card>
+        </div>
+
+        <Card>
+          <div className="flex items-start justify-between gap-2 flex-wrap mb-3">
+            <div>
+              <h3 className="text-base font-bold" style={{ color: '#111' }}>Busy times</h3>
+              <p className="text-xs" style={{ color: '#6B7280' }}>Pickups by day and hour over the last 8 weeks. Plan driver shifts around the darker slots.</p>
             </div>
           </div>
-          {trendApi.status === 'loading' ? (
-            <div className="h-[180px] flex items-center justify-center text-sm" style={{ color: '#9CA3AF' }}>Loading…</div>
-          ) : trendApi.status === 'error' ? (
-            <div className="h-[180px] flex items-center justify-center text-sm" style={{ color: '#DC2626' }}>Couldn't load booking trend.</div>
-          ) : bookingsChartData.length === 0 ? (
-            <div className="h-[180px] flex items-center justify-center text-sm" style={{ color: '#9CA3AF' }}>No bookings in this period.</div>
+          {peakApi.status === 'loading' ? (
+            <div className="h-[200px] grid place-items-center text-sm" style={{ color: '#9CA3AF' }}>Loading…</div>
+          ) : peakApi.status === 'error' ? (
+            <p className="text-sm py-6" style={{ color: '#DC2626' }}>Couldn't load busy times.</p>
           ) : (
-            <BarChart data={bookingsChartData} />
+            <PeakHeatmap cells={peakApi.data?.cells || []} />
           )}
         </Card>
-        <Card>
-          <h3 className="text-sm font-semibold mb-4" style={{ color: '#1F2937' }}>Fleet status</h3>
-          {fleetStatus.length > 0
-            ? <DonutChart data={fleetStatus} size={140} />
-            : <p className="text-sm text-center py-8" style={{ color: '#9CA3AF' }}>No fleet data yet.</p>
-          }
-        </Card>
-      </div>
+      </section>
 
-      {/* ── Recent bookings + live feed ── */}
+      {/* Recent bookings + live activity */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card padded={false} className="lg:col-span-2">
           <div className="flex items-center justify-between px-5 pt-5 pb-3">
-            <h3 className="text-sm font-semibold" style={{ color: '#1F2937' }}>Recent bookings</h3>
+            <h2 className="text-base font-bold" style={{ color: '#111' }}>Recent bookings</h2>
+            <button className="text-sm font-semibold" style={{ color: '#2563EB' }} onClick={() => navigate('/admin/bookings')}>View all</button>
+          </div>
+          {recentBookings.length === 0 ? (
+            <p className="px-5 pb-6 text-sm" style={{ color: '#9CA3AF' }}>New bookings will show up here.</p>
+          ) : recentBookings.map((b, idx) => (
             <button
-              className="text-xs font-medium"
-              style={{ color: '#3B65DB' }}
-              onClick={() => navigate('/admin/bookings')}
+              key={b.id}
+              type="button"
+              className="w-full flex items-center justify-between gap-3 px-5 py-3 text-left hover:bg-gray-50"
+              style={{ borderTop: idx === 0 ? '1px solid #F3F4F6' : 'none', borderBottom: '1px solid #F3F4F6' }}
+              onClick={() => navigate(`/admin/bookings/${b.id}`)}
             >
-              View all →
-            </button>
-          </div>
-          <div>
-            {recentBookings.length === 0 && (
-              <p className="px-5 py-6 text-sm text-center" style={{ color: '#9CA3AF' }}>
-                No bookings yet.
-              </p>
-            )}
-            {recentBookings.map((b, idx) => (
-              <div
-                key={b.id}
-                className="flex items-center justify-between px-5 py-3 text-sm cursor-pointer hover:bg-gray-50"
-                style={{ borderBottom: idx < recentBookings.length - 1 ? '1px solid #F3F4F6' : 'none' }}
-                onClick={() => navigate(`/admin/bookings/${b.id}`)}
-              >
-                <div className="min-w-0 flex-1 mr-4">
-                  {/* customer name nested under b.customer.user.name */}
-                  <p className="font-medium truncate" style={{ color: '#1F2937' }}>
-                    {b.customer?.user?.name || b.corporate?.companyName || '—'}
-                  </p>
-                  {/* addresses are objects { address: "..." } — first segment only, single line */}
-                  <p className="text-xs mt-0.5 truncate" style={{ color: '#6B7280' }}>
-                    {addr(b.pickupAddress)?.split(',')[0]} → {addr(b.dropAddress)?.split(',')[0]}
-                  </p>
-                </div>
-                <div className="text-right shrink-0">
-                  <StatusBadge status={b.status} />
-                  <p className="text-xs mt-1" style={{ color: '#6B7280' }}>{formatDateTime(b.createdAt)}</p>
-                </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold truncate" style={{ color: '#111' }}>
+                  {(b.customer?.user?.name && !/^guest$/i.test(b.customer.user.name) ? b.customer.user.name : null) || b.guestName || b.corporate?.companyName || 'Customer'}
+                </p>
+                <p className="text-xs truncate" style={{ color: '#6B7280' }}>
+                  {placeName(b.pickupAddress)} to {placeName(b.dropAddress)}
+                </p>
               </div>
-            ))}
-          </div>
+              <div className="text-right shrink-0">
+                <StatusBadge status={b.status} />
+                <p className="text-xs mt-1" style={{ color: '#9CA3AF', fontVariantNumeric: 'tabular-nums' }}>{formatDateTime(b.pickupAt || b.createdAt)}</p>
+              </div>
+            </button>
+          ))}
         </Card>
 
-        {/* Live activity feed */}
         <Card padded={false}>
-          <div className="flex items-center gap-2 px-5 pt-5 pb-3">
-            <Zap size={14} style={{ color: '#F59E0B' }} />
-            <h3 className="text-sm font-semibold" style={{ color: '#1F2937' }}>Live activity</h3>
+          <div className="px-5 pt-5 pb-3">
+            <h2 className="text-base font-bold" style={{ color: '#111' }}>Live activity</h2>
           </div>
-          <div className="max-h-[420px] overflow-y-auto">
-            {feed.length === 0 && (
-              <p className="px-5 py-6 text-xs text-center" style={{ color: '#9CA3AF' }}>
-                Waiting for activity — new bookings appear here instantly.
-              </p>
+          <div className="max-h-[420px] overflow-y-auto" style={{ borderTop: '1px solid #F3F4F6' }}>
+            {feed.length === 0 && attempts.length === 0 && (
+              <p className="px-5 py-6 text-sm" style={{ color: '#9CA3AF' }}>New bookings, payments and alerts appear here as they happen.</p>
             )}
-            {feed.map((item, idx) => {
-              const cfg = FEED_LABEL[item.kind] || { text: item.kind, color: '#6B7280', bg: '#F7F8FC' };
+            {feed.slice(0, 30).map((item) => {
+              const cfg = FEED_LABEL[item.kind] || { text: titleCase(String(item.kind || '').replace(/[:_]/g, ' ')), color: '#4B5563', bg: '#F3F4F6' };
+              const detail = item.text || [
+                item.bookingNumber || item.requestNumber || item.customerName || item.name,
+                item.status ? titleCase(item.status) : null,
+                item.reason || null,
+                item.amount ? `₹${Number(item.amount).toLocaleString('en-IN')}` : null,
+              ].filter(Boolean).join(', ');
               return (
-                <div key={item.id} className="px-5 py-3 text-sm"
-                  style={{ borderBottom: idx < feed.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
+                <div key={item.id} className="px-5 py-3" style={{ borderBottom: '1px solid #F3F4F6' }}>
                   <div className="flex items-center justify-between gap-2">
-                    <span
-                      className="text-[12.5px] font-bold px-2 py-0.5 rounded-full"
-                      style={{ backgroundColor: cfg.bg, color: cfg.color }}
-                    >
-                      {cfg.text}
-                    </span>
-                    <span className="text-[12.5px]" style={{ color: '#9CA3AF' }}>{formatDateTime(item.at)}</span>
+                    <span className="text-xs font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: cfg.bg, color: cfg.color }}>{cfg.text}</span>
+                    <span className="text-xs" style={{ color: '#9CA3AF', fontVariantNumeric: 'tabular-nums' }}>{formatDateTime(item.at)}</span>
+                  </div>
+                  {detail && <p className="mt-1.5 text-xs" style={{ color: '#374151' }}>{detail}</p>}
+                </div>
+              );
+            })}
+            {feed.length === 0 && attempts.map((a) => {
+              const who = attemptWho(a);
+              const oc = ATTEMPT_LABEL[attemptState(a).outcome] || a.outcome;
+              return (
+                <div key={a.id} className="px-5 py-3" style={{ borderBottom: '1px solid #F3F4F6' }}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: '#F3F4F6', color: '#4B5563' }}>{oc || 'Checkout attempt'}</span>
+                    <span className="text-xs" style={{ color: '#9CA3AF' }}>{formatDateTime(a.createdAt)}</span>
                   </div>
                   <p className="mt-1.5 text-xs" style={{ color: '#374151' }}>
-                    {item.bookingNumber || item.bookingId || item.attemptId}
-                    {item.status ? ` — ${titleCase(item.status)}` : ''}
-                    {item.reason ? ` — ${item.reason}` : ''}
-                    {item.amount ? ` — ₹${item.amount}` : ''}
+                    {who.name}{who.phone ? `, ${who.phone}` : ''}{a.pickupAddress ? `: ${placeName(a.pickupAddress)} to ${placeName(a.dropAddress)}` : ''}
                   </p>
                 </div>
               );

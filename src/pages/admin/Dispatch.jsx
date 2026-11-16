@@ -7,8 +7,8 @@
  * The key is `available`, not `vehicles`. Changed line:
  *   board.data?.vehicles?.vehicles  →  board.data?.vehicles?.available
  */
-import { useState, useCallback, useEffect } from 'react';
-import { Truck, Radio, AlertCircle, User, RefreshCw, UserPlus, ChevronDown } from 'lucide-react';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { Truck, Radio, AlertCircle, User, RefreshCw, UserPlus, ChevronDown, PlusCircle } from 'lucide-react';
 import PageHeader   from '../../components/ui/PageHeader';
 import Card         from '../../components/ui/Card';
 import Select       from '../../components/ui/Select';
@@ -20,12 +20,16 @@ import EmptyState   from '../../components/ui/EmptyState';
 import LoadingState from '../../components/ui/LoadingState';
 import ErrorState   from '../../components/ui/ErrorState';
 import Badge        from '../../components/ui/Badge';
+import VehicleFormDrawer from '../../components/vehicle/VehicleFormDrawer';
 import { useApi }   from '../../hooks/useApi';
 import { useToast } from '../../hooks/useToast';
 import { useAdminRealtimeContext } from '../../context/AdminRealtimeContext';
 import { apiClient } from '../../services/apiClient';
 import { dispatchService } from '../../services/dispatchService';
 import { bookingOpsService } from '../../services/bookingOpsService';
+import { vehicleService } from '../../services';
+import { vehicleCatalogService } from '../../services/vehicleCatalogService';
+import { sameClass, canonicalClass, alignClasses } from '../../utils/vehicleClass';
 import { formatCurrency, formatDateTime, titleCase } from '../../utils/formatters';
 
 function addr(val) {
@@ -36,7 +40,9 @@ function addr(val) {
 
 export default function Dispatch() {
   const toast = useToast();
-  const { lastBookingEventId } = useAdminRealtimeContext();
+  const { lastBookingEventId, unassignedSoon = [], refreshUnassigned } = useAdminRealtimeContext();
+  const urgentById = new Map(unassignedSoon.map((u) => [u.id, u]));
+  const timeLeft = (m) => (m <= 0 ? `${Math.abs(m)} min late` : m < 60 ? `in ${m} min` : `in ${Math.floor(m / 60)} h ${m % 60 ? `${m % 60} min` : ''}`.trim());
 
   const [assignments, setAssignments] = useState({});
   const [assigning,   setAssigning]   = useState({});
@@ -56,16 +62,43 @@ export default function Dispatch() {
 
   const board = useApi(() => apiClient.get('/admin/dispatch/board'), []);
 
-  const driversApi = useApi(
-    () => apiClient.get('/admin/drivers', {
-      params: { kycStatus: 'VERIFIED', limit: 100, page: 1 },
-    }),
-    []
-  );
+  // ALL verified drivers — every page, not just the first 100.
+  const driversApi = useApi(async () => {
+    const all = [];
+    let page = 1, totalPages = 1;
+    do {
+      const res = await apiClient.get('/admin/drivers', { params: { kycStatus: 'VERIFIED', limit: 100, page } });
+      all.push(...(res?.data ?? res?.items ?? []));
+      totalPages = res?.meta?.totalPages ?? res?.pagination?.totalPages ?? 1;
+      page += 1;
+    } while (page <= totalPages && page <= 20);
+    return { data: all };
+  }, []);
+
+  // Available vehicles straight from the fleet. The board's own vehicle list
+  // is cached by the backend for up to a minute, so a vehicle whose class was
+  // just corrected under Vehicles kept showing its old class here. Falls back
+  // to the board list if the fleet can't be read (no vehicle permission).
+  const [fleetTick, setFleetTick] = useState(0);
+  const fleetApi = useApi(async () => {
+    try {
+      const all = await vehicleService.listAll();
+      return all.filter((v) => v.isActive !== false && v.status === 'AVAILABLE');
+    } catch { return null; }
+  }, [fleetTick]);
+
+  // Vehicle classes from the catalogue (for the manual-entry dropdown and to
+  // spell classes the way bookings / rate cards do).
+  const catalogueApi = useApi(() => vehicleCatalogService.classOptions({ includeInactive: true }), []);
+  const classOptions  = catalogueApi.data || [];
+  const catalogueKeys = classOptions.map((o) => o.value);
+
+  const refreshAll = () => { board.refetch(); driversApi.refetch(); setFleetTick((t) => t + 1); refreshUnassigned?.(); };
 
   useEffect(() => {
     if (!lastBookingEventId) return;
     board.refetch();
+    setFleetTick((t) => t + 1);
   }, [lastBookingEventId]);
 
   const pendingBookings = board.data?.pending?.bookings || [];
@@ -73,7 +106,7 @@ export default function Dispatch() {
 
   // FIXED: backend returns `available`, not `vehicles`, inside the vehicles object
   // dispatch.service.board() → { vehicles: { count, available: [...] } }
-  const availableVehicles = board.data?.vehicles?.available || [];
+  const availableVehicles = fleetApi.data ?? board.data?.vehicles?.available ?? [];
 
   const allDrivers    = driversApi.data?.items ?? driversApi.data?.data ?? [];
   const sortedDrivers = [...allDrivers].sort((a, b) => {
@@ -94,18 +127,28 @@ export default function Dispatch() {
     const m = manualData[bookingId] || {};
     if (!m.driverName?.trim()) { toast.error('Enter driver name'); return; }
     if (!m.mobile?.trim()) { toast.error('Enter mobile number'); return; }
-    if (!m.vehicleNumber?.trim()) { toast.error('Enter vehicle number'); return; }
+
+    // The hired driver can bring their OWN car (type its number) or drive one
+    // that is already in the fleet (pick it).
+    const useFleet = m.vehicleSource === 'fleet';
+    const fleetVehicle = useFleet ? availableVehicles.find((v) => v.id === m.fleetVehicleId) : null;
+    if (useFleet && !fleetVehicle) { toast.error('Select a fleet vehicle'); return; }
+    if (!useFleet && !m.vehicleNumber?.trim()) { toast.error('Enter vehicle number'); return; }
 
     const booking = pendingBookings.find((b) => b.id === bookingId);
-    const vehicleClass = m.vehicleClass?.trim() || booking?.vehicleClass || 'sedan';
+    const vehicleClass = useFleet
+      ? fleetVehicle.vehicleClass
+      : (m.vehicleClass?.trim() || canonicalClass(booking?.vehicleClass, catalogueKeys) || '');
+    if (!vehicleClass) { toast.error('Select a vehicle class'); return; }
 
     setAddingTemp((p) => ({ ...p, [bookingId]: true }));
     try {
       const res = await apiClient.post('/admin/temporary-drivers', {
         name: m.driverName.trim(),
         mobile: m.mobile.trim(),
-        vehicleNumber: m.vehicleNumber.trim(),
-        vehicleClass,
+        ...(useFleet
+          ? { vehicleId: fleetVehicle.id }
+          : { vehicleNumber: m.vehicleNumber.trim(), vehicleClass }),
       });
       const tempDriver = res?.data?.driver || res?.driver || res?.data || {};
       const vehicleId = tempDriver.vehicle?.id;
@@ -113,28 +156,101 @@ export default function Dispatch() {
 
       if (!vehicleId) throw new Error('Temporary driver created but no vehicle ID returned');
 
+      const aligned = await alignClasses({
+        booking,
+        vehicle: { id: vehicleId, vehicleClass: tempDriver.vehicle?.vehicleClass || vehicleClass },
+        catalogueKeys,
+      });
+      if (aligned.bookingChangedTo) toast.success(`Booking changed to ${titleCase(aligned.bookingChangedTo)} — fare re-quoted`);
+
       await apiClient.post(`/admin/dispatch/bookings/${bookingId}/assign`, {
         vehicleId,
         ...(driverId ? { driverId } : {}),
       });
 
       setAssignments((p) => ({ ...p, [bookingId]: { vehicleId, driverId, done: true } }));
-      toast.success(`${m.driverName.trim()} (${m.vehicleNumber.trim()}) added and assigned`);
-      setTimeout(() => { board.refetch(); driversApi.refetch(); }, 800);
+      toast.success(`${m.driverName.trim()} (${useFleet ? fleetVehicle.registrationNumber : m.vehicleNumber.trim()}) added and assigned`);
+      setTimeout(refreshAll, 800);
     } catch (e) {
       toast.error(e.message || 'Failed to add driver');
     } finally {
       setAddingTemp((p) => ({ ...p, [bookingId]: false }));
     }
-  }, [manualData, pendingBookings, toast, board, driversApi]);
+  }, [manualData, pendingBookings, toast, refreshAll, catalogueKeys, availableVehicles]);
 
+  // ── Add a brand-new vehicle to the fleet without leaving Dispatch ──
+  // `target` is the assignment key to pre-select it on (a booking id, or
+  // `reassign-<id>` for a live trip), or null from the page header.
+  const [vehicleDrawer, setVehicleDrawer] = useState({ open: false, target: null });
+  const createdVehicleRef = useRef(null);
+  const openNewVehicle = (target = null) => { createdVehicleRef.current = null; setVehicleDrawer({ open: true, target }); };
+  const createVehicle = async (values) => {
+    const result = await vehicleService.create(values);
+    const vehicle = result?.vehicle || result;
+    createdVehicleRef.current = vehicle;
+    toast.success(`${vehicle?.registrationNumber || 'Vehicle'} added to the fleet`);
+    return vehicle; // VehicleFormDrawer uploads documents against this id
+  };
+  // Called once the drawer has finished (vehicle saved + any uploads).
+  const closeNewVehicle = () => {
+    const created = createdVehicleRef.current;
+    const target = vehicleDrawer.target;
+    setVehicleDrawer({ open: false, target: null });
+    if (!created?.id) return;
+    setFleetTick((t) => t + 1);
+    if (target && target.startsWith('manual-')) {
+      const bookingId = target.slice('manual-'.length);
+      setManualData((p) => ({ ...p, [bookingId]: { ...p[bookingId], vehicleSource: 'fleet', fleetVehicleId: created.id } }));
+    } else if (target) {
+      setAssignments((p) => ({ ...p, [target]: { ...p[target], vehicleId: created.id } }));
+    }
+  };
+
+  // Every free vehicle is offered — nothing is locked to the booking's class.
+  // Same-class vehicles (compared ignoring case / spaces / hyphens) come
+  // first; any other class can still be picked, and the booking is moved to
+  // that class (fare re-quoted) when you press Assign.
   function vehiclesForBooking(booking) {
-    return availableVehicles.filter((v) => {
-      if (assignedVehicleIds.has(v.id)) return false;
-      if (booking.vehicleClass && v.vehicleClass !== booking.vehicleClass) return false;
-      return true;
-    });
+    return availableVehicles
+      .filter((v) => !assignedVehicleIds.has(v.id))
+      .map((v) => ({ ...v, _match: !booking.vehicleClass || sameClass(v.vehicleClass, booking.vehicleClass) }))
+      .sort((a, b) => (b._match - a._match)
+        || String(a.registrationNumber || '').localeCompare(String(b.registrationNumber || '')));
   }
+
+  const vehicleLabel = (v) =>
+    [v.registrationNumber, v.makeModel, titleCase(v.vehicleClass || ''), v.seatingCapacity ? `${v.seatingCapacity} seats` : null]
+      .filter(Boolean).join(' · ') + (v._match ? '' : '  (different class)');
+
+  // Who will actually get the trip in their driver app. With no driver picked,
+  // the backend gives it to the driver who drives that vehicle; if the vehicle
+  // has none, the trip reaches NO driver app and staff would have to move it
+  // along by hand (Mark En Route, Start Trip…).
+  const driverNote = (vehicleId, driverId) => {
+    if (!vehicleId || driverId) return null;
+    const own = sortedDrivers.find((d) => d.assignedVehicleId === vehicleId);
+    return own ? (
+      <p className="text-xs" style={{ color: '#15803D' }}>
+        Driver: <strong>{own.user?.name}</strong> (drives this vehicle) — the trip will appear in their app.
+      </p>
+    ) : (
+      <p className="text-xs rounded-lg px-3 py-2" style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', color: '#B91C1C' }}>
+        This vehicle has no driver. Pick one above — otherwise the trip won't appear in any driver app and you'll have to update its status yourself.
+      </p>
+    );
+  };
+
+  // Warning shown under the vehicle select when the pick is another class.
+  const classChangeNote = (booking, vehicleId) => {
+    const v = availableVehicles.find((x) => x.id === vehicleId);
+    if (!v || !booking.vehicleClass || sameClass(v.vehicleClass, booking.vehicleClass)) return null;
+    return (
+      <p className="text-xs rounded-lg px-3 py-2" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E' }}>
+        Booking is <strong>{titleCase(booking.vehicleClass)}</strong>, this vehicle is <strong>{titleCase(v.vehicleClass)}</strong>.
+        Assigning will change the booking to {titleCase(v.vehicleClass)} and re-quote the fare.
+      </p>
+    );
+  };
 
   function driversForBooking() {
     return sortedDrivers.filter((d) => !assignedDriverIds.has(d.userId));
@@ -148,6 +264,13 @@ export default function Dispatch() {
     if (!a?.vehicleId) { toast.error('Select a vehicle before assigning.'); return; }
     setAssigning((p) => ({ ...p, [bookingId]: true }));
     try {
+      const aligned = await alignClasses({
+        booking: pendingBookings.find((b) => b.id === bookingId),
+        vehicle: availableVehicles.find((v) => v.id === a.vehicleId),
+        catalogueKeys,
+      });
+      if (aligned.bookingChangedTo) toast.success(`Booking changed to ${titleCase(aligned.bookingChangedTo)} — fare re-quoted`);
+
       await apiClient.post(`/admin/dispatch/bookings/${bookingId}/assign`, {
         vehicleId: a.vehicleId,
         ...(a.driverId ? { driverId: a.driverId } : {}),
@@ -159,13 +282,13 @@ export default function Dispatch() {
         `${vehicle?.registrationNumber || 'Vehicle'} assigned` +
         (driver ? ` to ${driver.user?.name}` : '')
       );
-      setTimeout(() => board.refetch(), 800);
+      setTimeout(refreshAll, 800);
     } catch (e) {
       toast.error(e.message || 'Assignment failed');
     } finally {
       setAssigning((p) => ({ ...p, [bookingId]: false }));
     }
-  }, [assignments, availableVehicles, sortedDrivers, toast, board]);
+  }, [assignments, availableVehicles, sortedDrivers, toast, refreshAll, pendingBookings, catalogueKeys]);
 
   const reassign = useCallback(async (bookingId) => {
     const a = assignments[`reassign-${bookingId}`];
@@ -179,6 +302,14 @@ export default function Dispatch() {
       // dispatcher is only swapping the DRIVER, reuse the booking's current
       // vehicle so the request validates instead of failing with a 400.
       let vehicleId = a.vehicleId || null;
+      if (vehicleId) {
+        const aligned = await alignClasses({
+          booking: liveTrips.find((t) => t.id === bookingId),
+          vehicle: availableVehicles.find((v) => v.id === vehicleId),
+          catalogueKeys,
+        });
+        if (aligned.bookingChangedTo) toast.success(`Booking changed to ${titleCase(aligned.bookingChangedTo)} — fare re-quoted`);
+      }
       if (!vehicleId) {
         const alloc = await dispatchService.allocation(bookingId);
         vehicleId = alloc?.allocation?.vehicleId ?? alloc?.vehicleId ?? null;
@@ -194,13 +325,13 @@ export default function Dispatch() {
       });
       setAssignments((p) => ({ ...p, [`reassign-${bookingId}`]: { ...p[`reassign-${bookingId}`], done: true } }));
       toast.success('Booking reassigned successfully');
-      setTimeout(() => board.refetch(), 800);
+      setTimeout(refreshAll, 800);
     } catch (e) {
       toast.error(e.message || 'Reassignment failed');
     } finally {
       setAssigning((p) => ({ ...p, [`reassign-${bookingId}`]: false }));
     }
-  }, [assignments, toast, board]);
+  }, [assignments, toast, refreshAll, liveTrips, availableVehicles, catalogueKeys]);
 
   // Read-only suggestions — nearest available, matching-class vehicle+driver.
   // Built entirely from existing endpoints (no backend change):
@@ -248,6 +379,7 @@ export default function Dispatch() {
         return {
           vehicleId: v.id,
           vehicleType: v.vehicleClass,
+          classMatch: v._match,
           registrationNumber: v.registrationNumber,
           driverId: driver?.userId || null,
           driverName: driver?.user?.name || null,
@@ -258,15 +390,16 @@ export default function Dispatch() {
       });
 
       items.sort((a, b) => {
+        if (a.classMatch !== b.classMatch) return a.classMatch ? -1 : 1;
         if (a.distanceKm == null && b.distanceKm == null) return 0;
         if (a.distanceKm == null) return 1;
         if (b.distanceKm == null) return -1;
         return a.distanceKm - b.distanceKm;
       });
-      if (items.length && items[0].distanceKm != null) items[0].recommended = true;
+      if (items.length && items[0].distanceKm != null && items[0].classMatch) items[0].recommended = true;
 
       setSuggestions((p) => ({ ...p, [bookingId]: { loading: false, items, error: null } }));
-      if (items.length === 0) toast.error('No available vehicle matches this booking\'s class right now.');
+      if (items.length === 0) toast.error('No vehicles are free right now.');
     } catch (e) {
       setSuggestions((p) => ({ ...p, [bookingId]: { loading: false, items: [], error: e.message || 'Could not load suggestions' } }));
       toast.error(e.message || 'Could not load driver suggestions');
@@ -296,13 +429,32 @@ export default function Dispatch() {
             {liveTrips.length > 0 && (
               <Badge tone="blue">{liveTrips.length} live trip{liveTrips.length > 1 ? 's' : ''}</Badge>
             )}
-            <button onClick={() => { board.refetch(); driversApi.refetch(); }}
+            <Button size="sm" variant="secondary" icon={PlusCircle} onClick={() => openNewVehicle(null)}>Add vehicle</Button>
+            <button onClick={refreshAll}
               className="text-xs font-medium flex items-center gap-1" style={{ color: '#3B65DB' }}>
               <RefreshCw size={12} /> Refresh
             </button>
           </div>
         }
       />
+
+      {unassignedSoon.length > 0 && (
+        <div className="rounded-xl px-4 py-3 mb-4" style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA' }}>
+          <p className="text-sm font-semibold flex items-center gap-2" style={{ color: '#B91C1C' }}>
+            <AlertCircle size={16} /> {unassignedSoon.length} trip{unassignedSoon.length > 1 ? 's' : ''} picking up within 3 hours still need{unassignedSoon.length > 1 ? '' : 's'} a vehicle or driver
+          </p>
+          <div className="mt-2 flex flex-col gap-1">
+            {unassignedSoon.slice(0, 8).map((u) => (
+              <div key={u.id} className="text-xs flex flex-wrap gap-x-2" style={{ color: '#7F1D1D' }}>
+                <span className="font-mono font-semibold">{u.bookingNumber}</span>
+                <span>· pickup {timeLeft(u.minutesToPickup)} ({formatDateTime(u.pickupAt)})</span>
+                <span>· {u.needsConfirmation ? 'not confirmed yet' : u.missing === 'DRIVER' ? `no driver (vehicle ${u.vehicleNumber || 'assigned'})` : 'no vehicle or driver'}</span>
+                <span>· {u.customerName}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {availableVehicles.length === 0 && pendingBookings.length > 0 && (
         <div className="flex items-start gap-3 rounded-xl px-4 py-3 mb-4"
@@ -341,6 +493,9 @@ export default function Dispatch() {
                         </p>
                         <StatusBadge status={isDone ? 'ALLOCATED' : b.status} />
                         <span className="font-mono text-xs" style={{ color: '#9CA3AF' }}>{b.bookingNumber}</span>
+                        {!isDone && urgentById.has(b.id) && (
+                          <Badge tone="red">⏰ Pickup {timeLeft(urgentById.get(b.id).minutesToPickup)}</Badge>
+                        )}
                       </div>
                       <p className="text-sm" style={{ color: '#6B7280' }}>
                         {addr(b.pickupAddress)} → {addr(b.dropAddress)}
@@ -385,6 +540,7 @@ export default function Dispatch() {
                                     {s.driverName || 'Vehicle only (no driver assigned)'}
                                   </span>
                                   <span style={{ color: '#9CA3AF' }}>{s.registrationNumber} · {titleCase(s.vehicleType || '')}</span>
+                                  {!s.classMatch && <Badge tone="amber">Other class</Badge>}
                                 </span>
                                 <span className="flex items-center gap-2 flex-shrink-0">
                                   <span style={{ color: '#6B7280' }}>
@@ -434,6 +590,33 @@ export default function Dispatch() {
                                 placeholder="9876543210" />
                             </FormField>
                           </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold" style={{ color: '#6B7280' }}>Vehicle:</span>
+                            {[['new', 'Their own car (enter number)'], ['fleet', 'Fleet vehicle']].map(([k, label]) => {
+                              const active = (manualData[b.id]?.vehicleSource || 'new') === k;
+                              return (
+                                <button key={k} type="button" onClick={() => setManualField(b.id, 'vehicleSource', k)}
+                                  className="text-xs font-semibold rounded-full px-3 py-1 border"
+                                  style={{ backgroundColor: active ? '#1F2937' : '#fff', color: active ? '#fff' : '#374151', borderColor: active ? '#1F2937' : '#E5E7EB' }}>
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {manualData[b.id]?.vehicleSource === 'fleet' ? (
+                            <div className="flex gap-2 items-end">
+                              <FormField label="Fleet vehicle" required style={{ margin: 0, flex: 1 }}
+                                hint={matchingVehicles.length === 0 ? 'No free vehicles — add one with New vehicle.' : undefined}>
+                                <Select
+                                  value={manualData[b.id]?.fleetVehicleId || ''}
+                                  placeholder="Select a vehicle"
+                                  onChange={(e) => setManualField(b.id, 'fleetVehicleId', e.target.value)}
+                                  options={matchingVehicles.map((v) => ({ value: v.id, label: vehicleLabel(v) }))}
+                                />
+                              </FormField>
+                              <Button size="sm" variant="secondary" icon={PlusCircle} onClick={() => openNewVehicle(`manual-${b.id}`)}>New vehicle</Button>
+                            </div>
+                          ) : (
                           <div className="grid grid-cols-2 gap-2">
                             <FormField label="Vehicle number" required style={{ margin: 0 }}>
                               <Input value={manualData[b.id]?.vehicleNumber || ''}
@@ -442,11 +625,15 @@ export default function Dispatch() {
                             </FormField>
                             <FormField label="Vehicle class" style={{ margin: 0 }}
                               hint={b.vehicleClass ? `Booking: ${titleCase(b.vehicleClass)}` : ''}>
-                              <Input value={manualData[b.id]?.vehicleClass || ''}
+                              <Select
+                                value={manualData[b.id]?.vehicleClass || canonicalClass(b.vehicleClass, catalogueKeys) || ''}
                                 onChange={(e) => setManualField(b.id, 'vehicleClass', e.target.value)}
-                                placeholder={b.vehicleClass || 'sedan'} />
+                                placeholder="Select vehicle class"
+                                options={classOptions.map((o) => ({ value: o.value, label: o.label && o.label !== o.value ? `${o.label} (${o.value})` : o.value }))}
+                              />
                             </FormField>
                           </div>
+                          )}
                           <div className="flex justify-end">
                             <Button size="sm" icon={UserPlus} loading={addingTemp[b.id]}
                               onClick={() => addAndAssign(b.id)}>
@@ -462,22 +649,23 @@ export default function Dispatch() {
                             {matchingVehicles.length === 0 ? (
                               <div className="flex-1 rounded-lg px-3 py-2 text-xs"
                                 style={{ backgroundColor: '#FEF9C3', border: '1px solid #FDE047', color: '#854D0E' }}>
-                                {availableVehicles.length === 0
-                                  ? 'No vehicles available'
-                                  : `No ${titleCase(b.vehicleClass || '')} available — ${availableVehicles.length} other class${availableVehicles.length > 1 ? 'es' : ''} free`}
+                                No vehicles available
                               </div>
                             ) : (
                               <Select
                                 value={a.vehicleId || ''}
-                                placeholder={`Vehicle — ${matchingVehicles.length} ${titleCase(b.vehicleClass || '')} available`}
+                                placeholder={(() => {
+                                  const same = matchingVehicles.filter((v) => v._match).length;
+                                  const other = matchingVehicles.length - same;
+                                  return `Vehicle — ${same} ${titleCase(b.vehicleClass || '')}${other ? ` · ${other} other class` : ''}`;
+                                })()}
                                 onChange={(e) => setField(b.id, 'vehicleId', e.target.value)}
-                                options={matchingVehicles.map((v) => ({
-                                  value: v.id,
-                                  label: `${v.registrationNumber} · ${v.makeModel} · ${v.seatingCapacity} seats`,
-                                }))}
+                                options={matchingVehicles.map((v) => ({ value: v.id, label: vehicleLabel(v) }))}
                               />
                             )}
+                            <Button size="sm" variant="secondary" icon={PlusCircle} onClick={() => openNewVehicle(b.id)}>New vehicle</Button>
                           </div>
+                          {classChangeNote(b, a.vehicleId)}
 
                           <div className="flex gap-2 items-center">
                             <User size={15} style={{ color: '#6B7280', flexShrink: 0 }} />
@@ -490,7 +678,7 @@ export default function Dispatch() {
                               }
                               onChange={(e) => setField(b.id, 'driverId', e.target.value || undefined)}
                               options={[
-                                { value: '', label: 'No driver (assign vehicle only)' },
+                                { value: '', label: "Vehicle's own driver (automatic)" },
                                 ...availableDrivers.map((d) => ({
                                   value: d.userId,
                                   label: `${d.user?.name}${d.isOnline ? ' 🟢 Online' : ' ⚪ Offline'} · ${d.user?.phone || ''}`,
@@ -498,6 +686,7 @@ export default function Dispatch() {
                               ]}
                             />
                           </div>
+                          {driverNote(a.vehicleId, a.driverId)}
 
                           <div className="flex gap-2 justify-end">
                             <Button size="sm" variant="secondary"
@@ -553,6 +742,9 @@ export default function Dispatch() {
                           </p>
                           <StatusBadge status={t.status} />
                           <span className="font-mono text-xs" style={{ color: '#9CA3AF' }}>{t.bookingNumber}</span>
+                          {!isDone && urgentById.has(t.id) && (
+                            <Badge tone="red">⏰ No driver · pickup {timeLeft(urgentById.get(t.id).minutesToPickup)}</Badge>
+                          )}
                         </div>
                         <p className="text-sm" style={{ color: '#6B7280' }}>
                           {addr(t.pickupAddress)} → {addr(t.dropAddress)}
@@ -594,13 +786,12 @@ export default function Dispatch() {
                               onChange={(e) => setField(aKey, 'vehicleId', e.target.value || undefined)}
                               options={[
                                 { value: '', label: 'Keep current vehicle' },
-                                ...matchingVehicles.map((v) => ({
-                                  value: v.id,
-                                  label: `${v.registrationNumber} · ${v.makeModel} · ${v.seatingCapacity} seats`,
-                                })),
+                                ...matchingVehicles.map((v) => ({ value: v.id, label: vehicleLabel(v) })),
                               ]}
                             />
+                            <Button size="sm" variant="secondary" icon={PlusCircle} onClick={() => openNewVehicle(aKey)}>New vehicle</Button>
                           </div>
+                          {classChangeNote(t, a.vehicleId)}
                           <div className="flex gap-2 items-center">
                             <User size={15} style={{ color: '#6B7280', flexShrink: 0 }} />
                             <Select
@@ -636,6 +827,7 @@ export default function Dispatch() {
           )}
         </div>
       )}
+      <VehicleFormDrawer open={vehicleDrawer.open} onClose={closeNewVehicle} initial={null} onSubmit={createVehicle} />
     </div>
   );
 }

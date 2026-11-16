@@ -17,7 +17,9 @@ const Clients        = lazyRetry(() => import('../pages/admin/Clients'));
 const Customers      = lazyRetry(() => import('../pages/admin/Customers'));
 const CustomerDetail = lazyRetry(() => import('../pages/admin/CustomerDetail'));
 const Drivers        = lazyRetry(() => import('../pages/admin/Drivers'));
+const DriverDetail   = lazyRetry(() => import('../pages/admin/DriverDetail'));
 const Vehicles       = lazyRetry(() => import('../pages/admin/Vehicles'));
+const VehicleDetail  = lazyRetry(() => import('../pages/admin/VehicleDetail'));
 const Bookings       = lazyRetry(() => import('../pages/admin/Bookings'));
 const BookingDetail  = lazyRetry(() => import('../pages/admin/BookingDetail'));
 const Dispatch       = lazyRetry(() => import('../pages/admin/Dispatch'));
@@ -63,7 +65,9 @@ export default function AppRoutes() {
           <Route path="customers"    element={<P permission={PERMISSIONS.CLIENTS_VIEW}><Customers /></P>} />
           <Route path="customers/:id" element={<P permission={PERMISSIONS.CLIENTS_VIEW}><CustomerDetail /></P>} />
           <Route path="drivers"      element={<P permission={PERMISSIONS.DRIVERS_VIEW}><Drivers /></P>} />
+          <Route path="drivers/:id"  element={<P permission={PERMISSIONS.DRIVERS_VIEW}><DriverDetail /></P>} />
           <Route path="vehicles"     element={<P permission={PERMISSIONS.VEHICLES_VIEW}><Vehicles /></P>} />
+          <Route path="vehicles/:id" element={<P permission={PERMISSIONS.VEHICLES_VIEW}><VehicleDetail /></P>} />
           <Route path="bookings"     element={<P permission={PERMISSIONS.BOOKINGS_VIEW}><Bookings /></P>} />
           <Route path="bookings/:id" element={<P permission={PERMISSIONS.BOOKINGS_VIEW}><BookingDetail /></P>} />
           <Route path="booking-requests" element={<P permission={PERMISSIONS.BOOKINGS_VIEW}><BookingRequests /></P>} />

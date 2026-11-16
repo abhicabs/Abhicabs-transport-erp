@@ -22,6 +22,7 @@ import { useToast } from '../../hooks/useToast';
 import { useAuth } from '../../hooks/useAuth';
 import { PERMISSIONS, BOOKING_TRANSITIONS, BOOKING_STATUS } from '../../constants';
 import { formatCurrency, formatDate, formatDateTime, titleCase } from '../../utils/formatters';
+import { sameClass, alignClasses } from '../../utils/vehicleClass';
 
 // Helper: backend returns pickupAddress/dropAddress as { address: "..." } objects
 function addr(val) {
@@ -74,8 +75,9 @@ function AssignModal({ open, onClose, onAssign, booking }) {
   // hides those; this list offered every available vehicle, so the wrong one
   // could be picked and only failed after pressing Assign.
   const wantedClass = booking?.vehicleClass || '';
-  const matchingVehicles = wantedClass ? vehicles.filter((v) => v.vehicleClass === wantedClass) : vehicles;
-  const otherVehicles = wantedClass ? vehicles.filter((v) => v.vehicleClass !== wantedClass) : [];
+  // Compared ignoring case / spaces / hyphens — "Swift Dzire" is swift-dzire.
+  const matchingVehicles = wantedClass ? vehicles.filter((v) => sameClass(v.vehicleClass, wantedClass)) : vehicles;
+  const otherVehicles = wantedClass ? vehicles.filter((v) => !sameClass(v.vehicleClass, wantedClass)) : [];
   const otherClassCount = otherVehicles.length;
 
   // Available vehicles, read straight from the fleet (the database), NOT from
@@ -154,7 +156,7 @@ function AssignModal({ open, onClose, onAssign, booking }) {
   const submit = async () => {
     if (!vehicleId) return;
     setLoading(true);
-    await onAssign(vehicleId, driverId || undefined);
+    await onAssign(vehicleId, driverId || undefined, vehicles.find((v) => v.id === vehicleId));
     setLoading(false);
     setDriverId('');
     onClose();
@@ -378,9 +380,12 @@ export default function BookingDetail() {
     }
   };
 
-  const handleAssign = async (vehicleId, driverId) => {
+  const handleAssign = async (vehicleId, driverId, vehicle) => {
     setTransitioning(true);
     try {
+      // Same class but spelled differently ("Swift-Dzire" vs "swift-dzire"):
+      // the backend compares exactly, so correct the vehicle's spelling first.
+      if (vehicle) await alignClasses({ booking, vehicle });
       // The real endpoint returns { allocation }, not the full updated
       // booking — refetch the booking fresh so its status reflects the
       // new allocation correctly rather than guessing at a merge.
