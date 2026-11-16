@@ -20,6 +20,7 @@ import { useResourceList } from '../../hooks/useResourceList';
 import { useToast }  from '../../hooks/useToast';
 import { reportsService, driverService, vehicleService } from '../../services';
 import { apiClient } from '../../services/apiClient';
+import { approveTemporaryDriver } from '../../services/compatService';
 import { formatCurrency, formatDate, formatDateTime, titleCase } from '../../utils/formatters';
 
 // Backend listDriversQuerySchema accepts:
@@ -208,7 +209,11 @@ function RosterTab() {
   };
 
   const handleCreateTemporary = async (payload) => {
-    await driverService.createTemporary(payload);
+    const created = await driverService.createTemporary(payload);
+    // The backend saves hires as KYC Pending, which sends them to the KYC screens
+    // in the driver app. Approve them now so they can start working.
+    const hired = created?.driver || created?.data || created;
+    await approveTemporaryDriver(hired?.userId);
     toast.success(`Temporary driver ${payload.name} created${payload.vehicleNumber ? ` — vehicle ${payload.vehicleNumber}` : '. Assign a vehicle when ready.'}`);
     reloadAll();
   };

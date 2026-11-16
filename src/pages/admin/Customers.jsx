@@ -182,6 +182,10 @@ export default function Customers() {
   // The list endpoint doesn't return a booking count, so it's fetched per
   // VISIBLE row only (GET /admin/bookings?customerId=X&limit=1) and cached.
   const [bookingCounts, setBookingCounts] = useState({});
+  // A website guest's real name/phone are on their bookings, not their account.
+  // The newer backend sends them on the list; on the current one they're read
+  // from the same one-row booking request used for the count below.
+  const [guestInfo, setGuestInfo] = useState({});
   const visibleUserIds = pageRows.map((r) => r.userId).join(',');
 
   useEffect(() => {
@@ -197,6 +201,10 @@ export default function Customers() {
         .then((res) => {
           const total = res?.meta?.total ?? res?.pagination?.total ?? 0;
           setBookingCounts((prev) => ({ ...prev, [r.userId]: total }));
+          const b = (res?.data ?? res?.items ?? [])[0];
+          if (b && (b.guestName || b.guestPhone)) {
+            setGuestInfo((prev) => ({ ...prev, [r.userId]: { name: b.guestName || null, phone: b.guestPhone || null, email: b.guestEmail || null } }));
+          }
         })
         .catch(() => {
           setBookingCounts((prev) => ({ ...prev, [r.userId]: 'error' }));
@@ -214,9 +222,10 @@ export default function Customers() {
         // typed at checkout (backend: displayName / guestName from their booking),
         // never the word "Guest". Guest-ness is shown in the User column instead.
         const accountName = r.user?.name && !/^guest$/i.test(r.user.name.trim()) ? r.user.name : null;
-        const displayName = r.displayName || r.guestName || accountName || 'Name not given';
+        const g = guestInfo[r.userId];
+        const displayName = r.displayName || r.guestName || (guest && g?.name) || accountName || 'Name not given';
         const contactLine = guest
-          ? (r.guestEmail || 'No email given')
+          ? (r.guestEmail || g?.email || 'No email given')
           : (isPlaceholderEmail(r.user?.email) ? 'No email (phone login)' : (r.user?.email || '—'));
         return (
           <div>
@@ -245,7 +254,7 @@ export default function Customers() {
       key: 'phone', header: 'Phone',
       render: (r) => (
         <span className="flex items-center gap-1" style={{ fontSize: 13, color: '#6B7280' }}>
-          <Phone size={12} />{r.displayPhone || r.user?.phone || r.guestPhone || '—'}
+          <Phone size={12} />{r.displayPhone || r.user?.phone || r.guestPhone || guestInfo[r.userId]?.phone || '—'}
         </span>
       ),
     },

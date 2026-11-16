@@ -30,6 +30,11 @@ import { bookingOpsService } from '../../services/bookingOpsService';
 import { vehicleService } from '../../services';
 import { vehicleCatalogService } from '../../services/vehicleCatalogService';
 import { sameClass, canonicalClass, alignClasses } from '../../utils/vehicleClass';
+import { approveTemporaryDriver } from '../../services/compatService';
+
+// Giving a hired driver a car that is already in the fleet needs the newer
+// backend (the current one refuses with "vehicle already on the fleet").
+const ALLOW_FLEET_VEHICLE_FOR_HIRE = false;
 import { formatCurrency, formatDateTime, titleCase } from '../../utils/formatters';
 
 function addr(val) {
@@ -155,6 +160,8 @@ export default function Dispatch() {
       const driverId = tempDriver.userId;
 
       if (!vehicleId) throw new Error('Temporary driver created but no vehicle ID returned');
+      // Let them into the driver app straight away (the backend saves hires as KYC Pending).
+      await approveTemporaryDriver(driverId);
 
       const aligned = await alignClasses({
         booking,
@@ -271,13 +278,17 @@ export default function Dispatch() {
       });
       if (aligned.bookingChangedTo) toast.success(`Booking changed to ${titleCase(aligned.bookingChangedTo)} — fare re-quoted`);
 
+      // No driver picked: send the vehicle's own driver. Without a driver on the
+      // assignment the trip never appears in any driver app, and staff end up
+      // pressing Mark En Route / Start Trip for them.
+      const driverId = a.driverId || sortedDrivers.find((d) => d.assignedVehicleId === a.vehicleId)?.userId || null;
       await apiClient.post(`/admin/dispatch/bookings/${bookingId}/assign`, {
         vehicleId: a.vehicleId,
-        ...(a.driverId ? { driverId: a.driverId } : {}),
+        ...(driverId ? { driverId } : {}),
       });
-      setAssignments((p) => ({ ...p, [bookingId]: { ...p[bookingId], done: true } }));
+      setAssignments((p) => ({ ...p, [bookingId]: { ...p[bookingId], driverId, done: true } }));
       const vehicle = availableVehicles.find((v) => v.id === a.vehicleId);
-      const driver  = sortedDrivers.find((d) => d.userId === a.driverId);
+      const driver  = sortedDrivers.find((d) => d.userId === driverId);
       toast.success(
         `${vehicle?.registrationNumber || 'Vehicle'} assigned` +
         (driver ? ` to ${driver.user?.name}` : '')
@@ -319,9 +330,18 @@ export default function Dispatch() {
           return;
         }
       }
+      // "Keep current driver" must be sent explicitly: the backend writes the new
+      // assignment with no driver otherwise, and the trip vanishes from the
+      // driver's app. A new vehicle brings its own driver if it has one.
+      const currentAlloc = liveTrips.find((t) => t.id === bookingId)?.allocations?.[0];
+      const vehicleChanged = currentAlloc?.vehicleId && vehicleId !== currentAlloc.vehicleId;
+      const driverId = a.driverId
+        || (vehicleChanged ? sortedDrivers.find((d) => d.assignedVehicleId === vehicleId)?.userId : null)
+        || currentAlloc?.driverId
+        || null;
       await apiClient.patch(`/admin/dispatch/bookings/${bookingId}/reassign`, {
         vehicleId,
-        ...(a.driverId  ? { driverId:  a.driverId  } : {}),
+        ...(driverId ? { driverId } : {}),
       });
       setAssignments((p) => ({ ...p, [`reassign-${bookingId}`]: { ...p[`reassign-${bookingId}`], done: true } }));
       toast.success('Booking reassigned successfully');
@@ -331,7 +351,7 @@ export default function Dispatch() {
     } finally {
       setAssigning((p) => ({ ...p, [`reassign-${bookingId}`]: false }));
     }
-  }, [assignments, toast, refreshAll, liveTrips, availableVehicles, catalogueKeys]);
+  }, [assignments, toast, refreshAll, liveTrips, availableVehicles, catalogueKeys, sortedDrivers]);
 
   // Read-only suggestions — nearest available, matching-class vehicle+driver.
   // Built entirely from existing endpoints (no backend change):
@@ -590,7 +610,7 @@ export default function Dispatch() {
                                 placeholder="9876543210" />
                             </FormField>
                           </div>
-                          <div className="flex items-center gap-2">
+                          {ALLOW_FLEET_VEHICLE_FOR_HIRE && <div className="flex items-center gap-2">
                             <span className="text-xs font-semibold" style={{ color: '#6B7280' }}>Vehicle:</span>
                             {[['new', 'Their own car (enter number)'], ['fleet', 'Fleet vehicle']].map(([k, label]) => {
                               const active = (manualData[b.id]?.vehicleSource || 'new') === k;
@@ -602,8 +622,8 @@ export default function Dispatch() {
                                 </button>
                               );
                             })}
-                          </div>
-                          {manualData[b.id]?.vehicleSource === 'fleet' ? (
+                          </div>}
+                          {ALLOW_FLEET_VEHICLE_FOR_HIRE && manualData[b.id]?.vehicleSource === 'fleet' ? (
                             <div className="flex gap-2 items-end">
                               <FormField label="Fleet vehicle" required style={{ margin: 0, flex: 1 }}
                                 hint={matchingVehicles.length === 0 ? 'No free vehicles — add one with New vehicle.' : undefined}>

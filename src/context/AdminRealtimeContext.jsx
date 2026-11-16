@@ -30,6 +30,7 @@ import { contactService, bookingService, bookingOpsService } from '../services';
 import { useAuth } from '../hooks/useAuth';
 import { PERMISSIONS } from '../constants';
 import { playNotificationSound } from '../lib/notificationSound';
+import { unassignedSoon as fetchUnassignedSoon } from '../services/compatService';
 
 const AdminRealtimeContext = createContext({
   connected: false, feed: [], lastEventId: null, lastBookingEventId: null,
@@ -369,8 +370,8 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
 
   const pollUnassigned = useCallback(async () => {
     try {
-      const res = await apiClient.get('/admin/dispatch/unassigned-soon', { params: { hours: 3 } });
-      const items = res?.items ?? res?.data?.items ?? [];
+      // Newer backend endpoint if present, otherwise worked out from the booking list.
+      const items = await fetchUnassignedSoon(3);
       setUnassignedSoon(items);
 
       const alerted = readDispatchAlerted();

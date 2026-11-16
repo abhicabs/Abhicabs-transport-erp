@@ -126,6 +126,12 @@ export default function CustomerDetail() {
   const bookingMeta = bookings.data?.meta ?? bookings.data?.pagination ?? {};
   const bookingPages = bookingMeta.totalPages ?? 1;
 
+  // The source (Website / App / WhatsApp / Admin) is only returned by the newer
+  // backend. On the current one the rows have no `channel`, the filter would be
+  // ignored, so the source chips and tags stay hidden.
+  const firstRows = bookings.data?.data ?? bookings.data?.items ?? [];
+  const channelSupported = firstRows.some((b) => Object.prototype.hasOwnProperty.call(b, 'channel'));
+
   // How many of this customer's bookings came from each channel (one tiny
   // request per channel: limit=1, read the total).
   const channelCounts = useApi(async () => {
@@ -136,7 +142,7 @@ export default function CustomerDetail() {
       } catch { return [c.key, null]; }
     }));
     return Object.fromEntries(entries);
-  }, [id]);
+  }, [id, channelSupported], { skip: !channelSupported });
 
   // FIX: "Total Bookings" / "Completed" / "Total Spend" used to be computed
   // from the same 10-row "Recent Bookings" preview above — accurate only for
@@ -331,7 +337,7 @@ export default function CustomerDetail() {
           <div className="px-5 pt-5 pb-3">
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <h2 className="text-sm font-bold" style={{ color: '#1F2937' }}>Bookings</h2>
-              <div className="flex gap-1.5 flex-wrap">
+              {channelSupported && <div className="flex gap-1.5 flex-wrap">
                 {CHANNELS.map((c) => {
                   const active = channel === c.key;
                   const count = channelCounts.data?.[c.key];
@@ -347,7 +353,7 @@ export default function CustomerDetail() {
                     </button>
                   );
                 })}
-              </div>
+              </div>}
             </div>
           </div>
           {bookings.status === 'loading' && <LoadingState label="Loading bookings…" />}
@@ -365,7 +371,7 @@ export default function CustomerDetail() {
                   onClick={() => navigate(`/admin/bookings/${b.id}`)}>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 min-w-0">
-                      <ChannelTag channel={b.channel} />
+                      {channelSupported && <ChannelTag channel={b.channel} />}
                       <p className="text-sm font-medium truncate" style={{ color: '#1F2937' }}>
                         {addr(b.pickupAddress)} → {addr(b.dropAddress)}
                       </p>

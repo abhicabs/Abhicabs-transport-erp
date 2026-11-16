@@ -33,6 +33,7 @@ import { useAdminRealtimeContext } from '../../context/AdminRealtimeContext';
 import { bookingService, reportsService, bookingOpsService } from '../../services';
 import { apiClient } from '../../services/apiClient';
 import { formatCurrency, formatDateTime, titleCase } from '../../utils/formatters';
+import { channelMix, peakHours } from '../../services/compatService';
 import { attemptWho, attemptState, ATTEMPT_LABEL } from '../../utils/attemptDetails';
 
 // ── Trend buckets ─────────────────────────────────────────────────────────
@@ -230,15 +231,30 @@ export default function Dashboard() {
   }, [trendApi.data, buckets]);
 
   // Where bookings come from (last 30 days) and when trips run (last 8 weeks).
-  const channelsApi = useApi(() => apiClient.get('/admin/reports/channels', { params: range }), []);
-  const peakApi = useApi(() => apiClient.get('/admin/reports/peak-hours', {
-    params: { from: new Date(Date.now() - 56 * DAY_MS).toISOString(), to: new Date().toISOString() },
+  // Bookings by source needs the newer backend (null = not available → trip outcomes instead).
+  const channelsApi = useApi(() => channelMix(range), []);
+  // Busy times: newer endpoint if present, otherwise counted from the booking list.
+  const peakApi = useApi(async () => ({ cells: await peakHours(56) }), []);
+  // Trip outcomes for the last 30 days, from the existing business-trend report.
+  const outcomesApi = useApi(() => apiClient.get('/admin/reports/business-trend', {
+    params: { from: new Date(Date.now() - 30 * DAY_MS).toISOString(), to: new Date().toISOString() },
   }), []);
+  const outcomes = useMemo(() => {
+    const series = outcomesApi.data?.series || [];
+    const t = series.reduce((a, r) => ({
+      b: a.b + (Number(r.bookings) || 0), c: a.c + (Number(r.completed) || 0), x: a.x + (Number(r.cancelled) || 0),
+    }), { b: 0, c: 0, x: 0 });
+    return [
+      { label: 'Completed', value: t.c },
+      { label: 'Cancelled', value: t.x },
+      { label: 'Upcoming or other', value: Math.max(0, t.b - t.c - t.x) },
+    ].filter((d) => d.value > 0);
+  }, [outcomesApi.data]);
 
   const refreshAll = () => {
     recentApi.refetch(); executiveApi.refetch(); fleetApi.refetch(); trendApi.refetch();
     pendingApi.refetch(); kycApi.refetch(); attemptsApi.refetch(); setBoardTick((t) => t + 1);
-    channelsApi.refetch(); peakApi.refetch();
+    channelsApi.refetch(); peakApi.refetch(); outcomesApi.refetch();
   };
 
   // A new booking arrived on the live connection: refresh what it affects.
@@ -443,13 +459,23 @@ export default function Dashboard() {
             )}
           </Card>
           <Card>
-            <h3 className="text-base font-bold mb-3" style={{ color: '#111' }}>Bookings by source</h3>
-            {channelsApi.status === 'loading' ? (
-              <div className="h-[200px] grid place-items-center text-sm" style={{ color: '#9CA3AF' }}>Loading…</div>
-            ) : channelsApi.status === 'error' ? (
-              <p className="text-sm py-6" style={{ color: '#DC2626' }}>Couldn't load booking sources.</p>
+            {channelsApi.status === 'success' && channelsApi.data ? (
+              <>
+                <h3 className="text-base font-bold mb-3" style={{ color: '#111' }}>Bookings by source</h3>
+                <ChannelMix channels={channelsApi.data} formatMoney={(n) => formatCurrency(n)} />
+              </>
             ) : (
-              <ChannelMix channels={channelsApi.data?.channels || []} formatMoney={(n) => formatCurrency(n)} />
+              <>
+                <h3 className="text-base font-bold mb-1" style={{ color: '#111' }}>Trip outcomes</h3>
+                <p className="text-xs mb-4" style={{ color: '#6B7280' }}>Bookings made in the last 30 days.</p>
+                {outcomesApi.status === 'loading' || channelsApi.status === 'loading' ? (
+                  <div className="h-[160px] grid place-items-center text-sm" style={{ color: '#9CA3AF' }}>Loading…</div>
+                ) : outcomes.length ? (
+                  <DonutChart data={outcomes} size={140} />
+                ) : (
+                  <p className="text-sm py-6" style={{ color: '#9CA3AF' }}>No bookings in the last 30 days yet.</p>
+                )}
+              </>
             )}
           </Card>
         </div>

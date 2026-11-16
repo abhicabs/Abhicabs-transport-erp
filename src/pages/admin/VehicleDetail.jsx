@@ -21,7 +21,7 @@ import LoadingState from '../../components/ui/LoadingState';
 import ErrorState   from '../../components/ui/ErrorState';
 import Alert        from '../../components/ui/Alert';
 import { useApi }   from '../../hooks/useApi';
-import { apiClient } from '../../services/apiClient';
+import { vehicleHistory } from '../../services/compatService';
 import { formatCurrency, formatDate, formatDateTime, titleCase } from '../../utils/formatters';
 
 const PAGE_SIZE = 10;
@@ -57,7 +57,9 @@ export default function VehicleDetail() {
   const navigate = useNavigate();
   const [tripPage, setTripPage] = useState(1);
 
-  const api = useApi(() => apiClient.get(`/admin/vehicles/${id}/history`), [id]);
+  // Full history on the newer backend; on the current one, built from the vehicle,
+  // the drivers list and the bookings this vehicle was assigned to.
+  const api = useApi(() => vehicleHistory(id), [id]);
   const data = api.data || {};
   const v = data.vehicle;
   const trips = useMemo(() => data.trips || [], [data.trips]);
@@ -176,8 +178,8 @@ export default function VehicleDetail() {
         )}
       </Card>
 
-      {/* Assignment history */}
-      <Section icon={History} title="Assignment history"
+      {/* Assignment history — recorded only by the newer backend */}
+      {data.assignmentsAvailable && <Section icon={History} title="Assignment history"
         hint={data.historySince
           ? `Each time this vehicle was given to or taken from a driver. Recorded since ${formatDate(data.historySince)}.`
           : 'Each time this vehicle is given to or taken from a driver is recorded from now on. Trips below show who drove it before that.'}>
@@ -185,7 +187,7 @@ export default function VehicleDetail() {
           onRowClick={(r) => openDriver(r.driverId)}
           emptyTitle="No assignment changes recorded yet"
           emptyDescription="The next time this vehicle is assigned to a driver it will appear here." />
-      </Section>
+      </Section>}
 
       {/* Drivers who drove it on trips */}
       <Section icon={Users} title="Drivers who drove it on trips" hint="Everyone who took this vehicle on a booking, with their first and last trip.">

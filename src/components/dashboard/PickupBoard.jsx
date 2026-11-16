@@ -20,8 +20,10 @@ export const READINESS = {
 export function readinessOf(b) {
   if (b.status === 'PENDING') return 'confirm';
   if (['EN_ROUTE', 'REACHED', 'ONGOING', 'ARRIVED'].includes(b.status)) return 'moving';
+  // CONFIRMED means no vehicle is held (a released allocation can still be the latest one listed).
+  if (b.status === 'CONFIRMED') return 'unassigned';
   const alloc = b.allocations?.[0];
-  if (!alloc) return 'unassigned';
+  if (!alloc || alloc.status === 'RELEASED') return 'unassigned';
   if (!alloc.driverId) return 'nodriver';
   return 'ready';
 }
