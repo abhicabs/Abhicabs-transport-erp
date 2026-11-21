@@ -299,7 +299,15 @@ export default function CustomerDetail() {
             </div>
           </div>
         </div>
-        <Button variant="secondary" onClick={() => setEditOpen(true)}>Edit customer</Button>
+        <div className="flex gap-2 flex-wrap">
+          <Button variant="secondary" onClick={() => setEditOpen(true)}>Edit customer</Button>
+          {/* A guest's account is a one-off web checkout, so new trips are booked for registered customers. */}
+          {!isGuest && (
+            <Button onClick={() => navigate(`/admin/bookings?new=1&customer=${id}&cname=${encodeURIComponent(displayName || '')}&cphone=${encodeURIComponent(displayPhone || '')}`)}>
+              New booking
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Stats */}

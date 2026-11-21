@@ -60,11 +60,17 @@ export default function Bookings() {
   // row isn't on the current page or passes the active filter, then strip the
   // param so a refresh or closing the modal doesn't reopen it.
   const [searchParams, setSearchParams] = useSearchParams();
-  // /admin/bookings?new=1 (the dashboard's "New booking") opens the form straight away.
+  // /admin/bookings?new=1 opens the form straight away (dashboard, customer
+  // pages). &customer=<id>&cname=&cphone= pre-selects that customer.
+  const [formCustomer, setFormCustomer] = useState(null);
   useEffect(() => {
     if (searchParams.get('new') !== '1') return;
+    const cid = searchParams.get('customer');
+    setFormCustomer(cid ? { userId: cid, name: searchParams.get('cname') || 'Customer', phone: searchParams.get('cphone') || '' } : null);
     setFormOpen(true);
-    const next = new URLSearchParams(searchParams); next.delete('new'); setSearchParams(next, { replace: true });
+    const next = new URLSearchParams(searchParams);
+    ['new', 'customer', 'cname', 'cphone'].forEach((k) => next.delete(k));
+    setSearchParams(next, { replace: true });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
   const confirmId = searchParams.get('confirm');
@@ -294,9 +300,8 @@ export default function Bookings() {
     },
   ];
 
-  const handleCreate = async (values) => {
-    await bookingService.create(values);
-    toast.success('Booking created');
+  const handleCreated = (booking, { confirmed } = {}) => {
+    toast.success(`${booking?.bookingNumber || 'Booking'} created${confirmed ? ' and confirmed' : ' (Pending)'}`);
     list.reload();
   };
 
@@ -306,7 +311,7 @@ export default function Bookings() {
         title="Bookings"
         description="All bookings start as PENDING. Call the customer, verify details, then confirm."
         actions={canManage && (
-          <Button icon={Plus} onClick={() => setFormOpen(true)}>New booking</Button>
+          <Button icon={Plus} onClick={() => { setFormCustomer(null); setFormOpen(true); }}>New booking</Button>
         )}
       />
 
@@ -371,7 +376,7 @@ export default function Bookings() {
         emptyDescription="Try adjusting your filters or date range."
       />
 
-      <BookingFormDrawer open={formOpen} onClose={() => setFormOpen(false)} onSubmit={handleCreate} />
+      <BookingFormDrawer open={formOpen} onClose={() => setFormOpen(false)} onCreated={handleCreated} initialCustomer={formCustomer} />
 
       <ConfirmBookingModal
         open={!!confirmingBooking}

@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Pencil, Phone, Mail } from 'lucide-react';
+import { Pencil, Phone, Mail, UserPlus, CalendarPlus } from 'lucide-react';
 import PageHeader    from '../../components/ui/PageHeader';
 import FilterBar     from '../../components/ui/FilterBar';
 import DataTable     from '../../components/ui/DataTable';
@@ -8,6 +8,8 @@ import IconButton    from '../../components/ui/IconButton';
 import Badge         from '../../components/ui/Badge';
 import Input         from '../../components/ui/Input';
 import CustomerFormDrawer from '../../components/customer/CustomerFormDrawer';
+import NewCustomerDrawer from '../../components/customer/NewCustomerDrawer';
+import Button from '../../components/ui/Button';
 import { adminCustomersService, bookingService } from '../../services';
 import { useToast }    from '../../hooks/useToast';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -61,6 +63,14 @@ function isGuestCustomer(r) {
 export default function Customers() {
   const navigate  = useNavigate();
   const toast     = useToast();
+  const [addOpen, setAddOpen] = useState(false);
+  const bookFor = (c) => navigate(`/admin/bookings?new=1&customer=${c.userId}&cname=${encodeURIComponent(c.name || '')}&cphone=${encodeURIComponent(c.phone || '')}`);
+  const handleCustomerAdded = (c, { bookNow, hadAddress } = {}) => {
+    if (c.existed) toast.info(`${c.name} is already a customer`);
+    else toast.success(`${c.name} added${hadAddress ? '' : '. They appear in this list after their first booking.'}`);
+    if (bookNow) bookFor(c);
+    else reload();
+  };
   const { hasPermission } = useAuth();
   const canManage = hasPermission(PERMISSIONS.CLIENTS_MANAGE);
 
@@ -348,7 +358,12 @@ export default function Customers() {
       <PageHeader
         title="Customers"
         description="Registered (logged-in) users and guest users. Use the user filter to separate them."
+        actions={<>
+          <Button variant="secondary" icon={CalendarPlus} onClick={() => navigate('/admin/bookings?new=1')}>New booking</Button>
+          <Button icon={UserPlus} onClick={() => setAddOpen(true)}>Add customer</Button>
+        </>}
       />
+      <NewCustomerDrawer open={addOpen} onClose={() => setAddOpen(false)} onCreated={handleCustomerAdded} />
 
       <FilterBar
         search={search}
