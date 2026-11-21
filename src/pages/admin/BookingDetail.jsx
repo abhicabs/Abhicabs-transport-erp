@@ -466,6 +466,12 @@ export default function BookingDetail() {
     { icon: MapPin, label: 'Drop', value: booking.dropAddress },
     { icon: Package, label: 'Vehicle Class', value: `${booking.vehicleClass} · ${booking.tripType}` },
     { icon: IndianRupee, label: 'Fare', value: formatCurrency(fare) },
+    // Promo or staff discount, as saved when the booking was priced.
+    ...(booking.fareBasis?.discount ? [{
+      icon: IndianRupee,
+      label: 'Discount',
+      value: `− ${formatCurrency(Number(booking.fareBasis.discount.amount) || 0)} (${booking.fareBasis.discount.code}${booking.fareBasis.discount.code?.startsWith('STAFF') ? ', given by staff' : ''}), before discount ${formatCurrency(Number(booking.fareBasis.discount.grossTotal) || 0)}`,
+    }] : []),
     { icon: Calendar, label: 'Pickup Time', value: formatDateTime(booking.pickupAt) },
     // Round trips carry a return DATE only. The backend stores it as the end of
     // that day in IST, so it is formatted in IST and never shown with a time.

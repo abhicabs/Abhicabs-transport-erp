@@ -300,8 +300,9 @@ export default function Bookings() {
     },
   ];
 
-  const handleCreated = (booking, { confirmed } = {}) => {
-    toast.success(`${booking?.bookingNumber || 'Booking'} created${confirmed ? ' and confirmed' : ' (Pending)'}`);
+  const handleCreated = (booking, { confirmed, discount } = {}) => {
+    const off = discount ? `, ${formatCurrency(Number(discount))} discount` : '';
+    toast.success(`${booking?.bookingNumber || 'Booking'} created${confirmed ? ' and confirmed' : ' (Pending)'}${off}`);
     list.reload();
   };
 

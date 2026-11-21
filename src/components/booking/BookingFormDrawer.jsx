@@ -18,7 +18,7 @@
  * Props: open, onClose, onCreated(booking, { confirmed }), initialCustomer ({ userId, name, phone })
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Search, UserPlus, X, Users } from 'lucide-react';
+import { Search, UserPlus, X, Users, BadgePercent } from 'lucide-react';
 import Drawer    from '../ui/Drawer';
 import FormField from '../ui/FormField';
 import Input     from '../ui/Input';
@@ -61,7 +61,27 @@ const EMPTY = () => ({
   tripType: 'ONE_WAY', pickup: '', drop: '', ...defaultWhen(), returnDate: '', rentalHours: '4',
   vehicleClass: '', paymentMode: 'ZERO', notes: '',
   otherTraveller: false, travellerName: '', travellerPhone: '', confirmNow: true,
+  // Discount: 'NONE' | 'PROMO' (an existing promo code) | 'CUSTOM' (staff gives ₹ or % off)
+  discountMode: 'NONE', promoCode: '', customType: 'FLAT', customValue: '', customReason: '',
 });
+
+const DISCOUNT_MODES = [
+  { value: 'NONE',   label: 'No discount' },
+  { value: 'PROMO',  label: 'Promo code' },
+  { value: 'CUSTOM', label: 'Give discount' },
+];
+
+/**
+ * A staff discount is issued as a ONE-USE promo code made for this booking
+ * (POST /admin/discounts), then applied like any promo. That way the backend
+ * prices it, stores it on the booking ("₹X less ₹Y"), records who gave it and
+ * why in the audit log, and it can never be reused.
+ */
+function staffCode() {
+  const bytes = new Uint8Array(4);
+  (globalThis.crypto || window.crypto).getRandomValues(bytes);
+  return `STAFF${Array.from(bytes, (b) => b.toString(36).padStart(2, '0')).join('').toUpperCase().slice(0, 7)}`;
+}
 
 const sectionTitle = { color: '#6B7280', letterSpacing: '0.04em' };
 const realEmail = (e) => (e && !e.endsWith('.invalid') && !e.endsWith('placeholder.local') ? e : null);
@@ -213,6 +233,32 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
   const hiddenCount = fares.status === 'ready' && priced.length ? classes.length - priced.length : 0;
   const visibleClasses = hiddenCount && !showAllClasses ? priced : classes;
 
+  // ── Discount ───────────────────────────────────────────────────────────
+  const selectedPrice = fares.byClass[v.vehicleClass] ?? null;
+  const [promoCheck, setPromoCheck] = useState(null); // { ok, amount, payable, reason, code }
+  const [checkingPromo, setCheckingPromo] = useState(false);
+  useEffect(() => { setPromoCheck(null); }, [v.promoCode, v.vehicleClass, selectedPrice, v.discountMode]);
+
+  const checkPromo = async () => {
+    const code = v.promoCode.trim().toUpperCase();
+    if (code.length < 3) { setPromoCheck({ ok: false, reason: 'Enter the promo code' }); return; }
+    if (selectedPrice == null) { setPromoCheck({ ok: false, reason: 'Fill the trip and choose a vehicle first, to see the discount.' }); return; }
+    setCheckingPromo(true);
+    try {
+      const r = await apiClient.post('/discounts/check', { code, fareTotal: selectedPrice, tripType: v.tripType });
+      setPromoCheck(r?.ok ? { ok: true, code, amount: Number(r.amount), payable: Number(r.payable) } : { ok: false, reason: r?.reason || 'That promo code is not valid' });
+    } catch (e) {
+      setPromoCheck({ ok: false, reason: e.message || 'Could not check the code' });
+    } finally { setCheckingPromo(false); }
+  };
+
+  const customAmount = useMemo(() => {
+    const val = Number(v.customValue);
+    if (!val || val <= 0 || selectedPrice == null) return null;
+    const amt = v.customType === 'PERCENT' ? (selectedPrice * Math.min(val, 100)) / 100 : Math.min(val, selectedPrice);
+    return Math.round(amt * 100) / 100;
+  }, [v.customValue, v.customType, selectedPrice]);
+
   // ── Submit ─────────────────────────────────────────────────────────────
   const validate = () => {
     const e = {};
@@ -226,6 +272,14 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
       else if (v.returnDate < v.date) e.returnDate = 'Return date cannot be before the pickup date';
     }
     if (!v.vehicleClass) e.vehicleClass = 'Choose a vehicle';
+    if (v.discountMode === 'PROMO' && v.promoCode.trim().length < 3) e.promoCode = 'Enter the promo code';
+    if (v.discountMode === 'CUSTOM') {
+      const val = Number(v.customValue);
+      if (!val || val <= 0) e.customValue = 'Enter the discount';
+      else if (v.customType === 'PERCENT' && val > 100) e.customValue = 'Cannot be more than 100%';
+      else if (v.customType === 'FLAT' && selectedPrice != null && val >= selectedPrice) e.customValue = 'Must be less than the fare';
+      if (v.customReason.trim().length < 3) e.customReason = 'Say why (e.g. regular customer, complaint)';
+    }
     if (v.otherTraveller) {
       if (v.travellerName.trim().length < 2) e.travellerName = 'Enter the traveller’s name';
       if (!indianMobile(v.travellerPhone)) e.travellerPhone = 'Enter a valid 10-digit mobile number';
@@ -251,9 +305,34 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
       ...(v.notes.trim() ? { specialRequests: v.notes.trim() } : {}),
       ...(v.otherTraveller ? { guestName: v.travellerName.trim(), guestPhone: indianMobile(v.travellerPhone) } : {}),
     };
+    let staffDiscountId = null;
     try {
+      if (v.discountMode === 'PROMO') payload.promoCode = v.promoCode.trim().toUpperCase();
+      if (v.discountMode === 'CUSTOM') {
+        const code = staffCode();
+        let created;
+        try {
+          created = await apiClient.post('/admin/discounts', {
+            code,
+            description: `Staff discount for ${customer.name || 'customer'}: ${v.customReason.trim()}`.slice(0, 200),
+            type: v.customType,
+            value: Number(v.customValue),
+            maxUses: 1,
+            maxUsesPerCustomer: 1,
+            appliesTo: 'ALL_BOOKINGS',
+            expiresAt: new Date(Date.now() + 2 * 3600000).toISOString(),
+            isActive: true,
+          });
+        } catch (err) {
+          if (err?.status === 403) throw new Error('Your login cannot give discounts. Ask an admin, or use a promo code.');
+          throw err;
+        }
+        staffDiscountId = created?.discount?.id ?? created?.id ?? null;
+        payload.promoCode = code;
+      }
       const res = await bookingService.create(payload);
       const booking = res?.booking || res;
+      staffDiscountId = null; // used by the booking; keep it as the record
       let confirmed = false;
       if (v.confirmNow && booking?.id) {
         try {
@@ -261,9 +340,12 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
           confirmed = true;
         } catch { /* created; it can still be confirmed from the list */ }
       }
-      onCreated?.(booking, { confirmed });
+      const discount = booking?.fareBasis?.discount?.amount ?? (v.discountMode === 'CUSTOM' ? customAmount : promoCheck?.amount) ?? null;
+      onCreated?.(booking, { confirmed, discount: v.discountMode !== 'NONE' ? discount : null });
       onClose();
     } catch (e) {
+      // The booking failed: retire the one-use code so it can't be used later.
+      if (staffDiscountId) apiClient.delete(`/admin/discounts/${staffDiscountId}`).catch(() => {});
       setFailure(e.message || 'Could not create the booking');
     } finally { setSaving(false); }
   };
@@ -418,6 +500,63 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
             </button>
           )}
           {errors.vehicleClass && <p className="text-xs mt-1" style={{ color: '#DC2626' }}>{errors.vehicleClass}</p>}
+        </section>
+
+        {/* Discount */}
+        <section className="space-y-3">
+          <p className="text-xs font-bold uppercase flex items-center gap-1.5" style={sectionTitle}>
+            <BadgePercent size={14} aria-hidden="true" /> Discount
+          </p>
+          <Segmented value={v.discountMode} onChange={(m) => set('discountMode', m)} options={DISCOUNT_MODES} />
+
+          {v.discountMode === 'PROMO' && (
+            <div>
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <Input value={v.promoCode} onChange={(e) => set('promoCode', e.target.value.toUpperCase())} placeholder="Promo code, e.g. WELCOME100" />
+                </div>
+                <Button size="sm" variant="secondary" loading={checkingPromo} onClick={checkPromo}>Check</Button>
+              </div>
+              {errors.promoCode && <p className="text-xs mt-1" style={{ color: '#DC2626' }}>{errors.promoCode}</p>}
+              {promoCheck && (
+                <p className="text-xs mt-1.5 font-semibold" style={{ color: promoCheck.ok ? '#15803D' : '#B91C1C' }}>
+                  {promoCheck.ok
+                    ? `${formatCurrency(promoCheck.amount)} off. Customer pays ${formatCurrency(promoCheck.payable)}.`
+                    : promoCheck.reason}
+                </p>
+              )}
+              <p className="text-xs mt-1" style={{ color: '#9CA3AF' }}>The code is checked again for this customer when the booking is created.</p>
+            </div>
+          )}
+
+          {v.discountMode === 'CUSTOM' && (
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: '#E5E7EB' }}>
+                  {[['FLAT', '₹ off'], ['PERCENT', '% off']].map(([k, label]) => (
+                    <button key={k} type="button" onClick={() => set('customType', k)} aria-pressed={v.customType === k}
+                      className="px-3 text-xs font-bold" style={{ backgroundColor: v.customType === k ? '#111' : '#fff', color: v.customType === k ? '#fff' : '#111', height: 40 }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex-1">
+                  <Input value={v.customValue} onChange={(e) => set('customValue', e.target.value.replace(/[^0-9.]/g, ''))}
+                    placeholder={v.customType === 'PERCENT' ? 'e.g. 10' : 'e.g. 200'} inputMode="decimal" />
+                </div>
+              </div>
+              {errors.customValue && <p className="text-xs" style={{ color: '#DC2626' }}>{errors.customValue}</p>}
+              <FormField label="Reason" required error={errors.customReason} hint="Saved with the booking for the record.">
+                <Input value={v.customReason} onChange={(e) => set('customReason', e.target.value)} placeholder="e.g. Regular customer, service complaint" />
+              </FormField>
+              {customAmount != null && (
+                <p className="text-xs font-semibold" style={{ color: '#15803D' }}>
+                  {formatCurrency(customAmount)} off. Customer pays about {formatCurrency(selectedPrice - customAmount)}.
+                </p>
+              )}
+              {selectedPrice == null && <p className="text-xs" style={{ color: '#9CA3AF' }}>Choose a vehicle to see the discounted fare.</p>}
+            </div>
+          )}
         </section>
 
         {/* Payment & notes */}
