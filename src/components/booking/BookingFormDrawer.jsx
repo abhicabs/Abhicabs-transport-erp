@@ -31,7 +31,8 @@ import { apiClient } from '../../services/apiClient';
 import { bookingService, vehicleCatalogService } from '../../services';
 import { createCustomer, indianMobile } from '../../services/customerCreateService';
 import { formatCurrency, titleCase } from '../../utils/formatters';
-import { VEHICLE_CLASSES } from '../../constants';
+import { VEHICLE_CLASSES, PERMISSIONS } from '../../constants';
+import { useAuth } from '../../hooks/useAuth';
 
 const DEFAULT_CITY_ID = 1; // Bengaluru; the fare quote may return a different operating city
 
@@ -63,6 +64,9 @@ const EMPTY = () => ({
   otherTraveller: false, travellerName: '', travellerPhone: '', confirmNow: true,
   // Discount: 'NONE' | 'PROMO' (an existing promo code) | 'CUSTOM' (staff gives ₹ or % off)
   discountMode: 'NONE', promoCode: '', customType: 'FLAT', customValue: '', customReason: '',
+  // Price override (FARE_EDIT only): staff type the final fare, higher or lower.
+  // Set from the "Edit price" button under the vehicle cards.
+  fareOverride: false, manualFare: '', manualReason: '',
 });
 
 const DISCOUNT_MODES = [
@@ -70,6 +74,7 @@ const DISCOUNT_MODES = [
   { value: 'PROMO',  label: 'Promo code' },
   { value: 'CUSTOM', label: 'Give discount' },
 ];
+
 
 /**
  * A staff discount is issued as a ONE-USE promo code made for this booking
@@ -235,6 +240,19 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
 
   // ── Discount ───────────────────────────────────────────────────────────
   const selectedPrice = fares.byClass[v.vehicleClass] ?? null;
+  const { hasPermission } = useAuth();
+  const canSetFare = hasPermission(PERMISSIONS.FARE_EDIT);
+  const overriding = canSetFare && v.fareOverride;
+  const manualAmount = Number(v.manualFare) > 0 ? Number(v.manualFare) : null;
+  // Editing started before fares loaded: fill in the rate-card price once it arrives (a typed amount is kept).
+  useEffect(() => {
+    if (v.fareOverride && selectedPrice != null && !v.manualFare) set('manualFare', String(Math.round(selectedPrice)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [v.vehicleClass, selectedPrice]);
+  const startOverride = () => {
+    setV((x) => ({ ...x, fareOverride: true, discountMode: 'NONE', manualFare: selectedPrice != null ? String(Math.round(selectedPrice)) : x.manualFare }));
+  };
+  const cancelOverride = () => setV((x) => ({ ...x, fareOverride: false, manualFare: '', manualReason: '' }));
   const [promoCheck, setPromoCheck] = useState(null); // { ok, amount, payable, reason, code }
   const [checkingPromo, setCheckingPromo] = useState(false);
   useEffect(() => { setPromoCheck(null); }, [v.promoCode, v.vehicleClass, selectedPrice, v.discountMode]);
@@ -272,13 +290,18 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
       else if (v.returnDate < v.date) e.returnDate = 'Return date cannot be before the pickup date';
     }
     if (!v.vehicleClass) e.vehicleClass = 'Choose a vehicle';
-    if (v.discountMode === 'PROMO' && v.promoCode.trim().length < 3) e.promoCode = 'Enter the promo code';
-    if (v.discountMode === 'CUSTOM') {
+    if (!overriding && v.discountMode === 'PROMO' && v.promoCode.trim().length < 3) e.promoCode = 'Enter the promo code';
+    if (!overriding && v.discountMode === 'CUSTOM') {
       const val = Number(v.customValue);
       if (!val || val <= 0) e.customValue = 'Enter the discount';
       else if (v.customType === 'PERCENT' && val > 100) e.customValue = 'Cannot be more than 100%';
       else if (v.customType === 'FLAT' && selectedPrice != null && val >= selectedPrice) e.customValue = 'Must be less than the fare';
       if (v.customReason.trim().length < 3) e.customReason = 'Say why (e.g. regular customer, complaint)';
+    }
+    if (overriding) {
+      const f = Number(v.manualFare);
+      if (!f || f <= 0) e.manualFare = 'Enter the fare';
+      if (v.manualReason.trim().length < 3) e.manualReason = 'Say why (e.g. agreed on call, corporate rate)';
     }
     if (v.otherTraveller) {
       if (v.travellerName.trim().length < 2) e.travellerName = 'Enter the traveller’s name';
@@ -307,8 +330,12 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
     };
     let staffDiscountId = null;
     try {
-      if (v.discountMode === 'PROMO') payload.promoCode = v.promoCode.trim().toUpperCase();
-      if (v.discountMode === 'CUSTOM') {
+      // Final amount set by staff. Only POST /admin/bookings accepts it, and
+      // only for FARE_EDIT; the rate-card figure is stored beside it. A manual
+      // fare is the final amount, so no discount is sent with it.
+      if (overriding) payload.manualFare = { total: Number(v.manualFare), reason: v.manualReason.trim() };
+      else if (v.discountMode === 'PROMO') payload.promoCode = v.promoCode.trim().toUpperCase();
+      if (!overriding && v.discountMode === 'CUSTOM') {
         const code = staffCode();
         let created;
         try {
@@ -341,7 +368,7 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
         } catch { /* created; it can still be confirmed from the list */ }
       }
       const discount = booking?.fareBasis?.discount?.amount ?? (v.discountMode === 'CUSTOM' ? customAmount : promoCheck?.amount) ?? null;
-      onCreated?.(booking, { confirmed, discount: v.discountMode !== 'NONE' ? discount : null });
+      onCreated?.(booking, { confirmed, discount: !overriding && v.discountMode !== 'NONE' ? discount : null });
       onClose();
     } catch (e) {
       // The booking failed: retire the one-use code so it can't be used later.
@@ -488,7 +515,12 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
                   }}>
                   <span className="block text-sm font-bold" style={{ color: '#111' }}>{c.label}</span>
                   <span className="block text-xs mt-0.5" style={{ color: unavailable ? '#9CA3AF' : '#374151', fontVariantNumeric: 'tabular-nums' }}>
-                    {c.price != null ? formatCurrency(c.price) : unavailable ? 'Not offered for this trip' : ' '}
+                    {on && overriding && manualAmount != null && c.price != null && manualAmount !== c.price ? (
+                      <>
+                        <span style={{ textDecoration: 'line-through', color: '#9CA3AF', marginRight: 6 }}>{formatCurrency(c.price)}</span>
+                        <strong style={{ color: '#111' }}>{formatCurrency(manualAmount)}</strong>
+                      </>
+                    ) : c.price != null ? formatCurrency(c.price) : unavailable ? 'Not offered for this trip' : ' '}
                   </span>
                 </button>
               );
@@ -500,6 +532,41 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
             </button>
           )}
           {errors.vehicleClass && <p className="text-xs mt-1" style={{ color: '#DC2626' }}>{errors.vehicleClass}</p>}
+
+          {/* Price for the chosen vehicle — editable by FARE_EDIT logins */}
+          {canSetFare && v.vehicleClass && selectedPrice != null && !overriding && (
+            <div className="mt-3 flex items-center justify-between rounded-lg px-3 py-2" style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB' }}>
+              <span className="text-sm" style={{ color: '#374151' }}>
+                Fare: <strong style={{ color: '#111' }}>{formatCurrency(selectedPrice)}</strong>
+                <span className="text-xs" style={{ color: '#9CA3AF' }}> (rate card)</span>
+              </span>
+              <button type="button" onClick={startOverride} className="text-xs font-bold" style={{ color: '#2563EB' }}>
+                Edit price
+              </button>
+            </div>
+          )}
+          {overriding && (
+            <div className="mt-3 space-y-2 rounded-lg p-3" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A' }}>
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase" style={{ color: '#92400E', letterSpacing: '0.04em' }}>Custom fare</span>
+                <button type="button" onClick={cancelOverride} className="text-xs font-semibold" style={{ color: '#2563EB' }}>
+                  Use rate card{selectedPrice != null ? ` (${formatCurrency(selectedPrice)})` : ''}
+                </button>
+              </div>
+              <FormField label="Fare the customer pays (₹)" required error={errors.manualFare}>
+                <Input value={v.manualFare} onChange={(e) => set('manualFare', e.target.value.replace(/[^0-9.]/g, ''))}
+                  placeholder="e.g. 18500" inputMode="decimal" autoFocus />
+              </FormField>
+              <FormField label="Reason" required error={errors.manualReason} hint="Saved with the booking and in the audit log.">
+                <Input value={v.manualReason} onChange={(e) => set('manualReason', e.target.value)} placeholder="e.g. Agreed on call, corporate rate, return discount" maxLength={500} />
+              </FormField>
+              {selectedPrice != null && manualAmount != null && manualAmount !== selectedPrice && (
+                <p className="text-xs font-semibold" style={{ color: manualAmount > selectedPrice ? '#B45309' : '#15803D' }}>
+                  {formatCurrency(Math.abs(manualAmount - selectedPrice))} {manualAmount > selectedPrice ? 'above' : 'below'} the rate card.
+                </p>
+              )}
+            </div>
+          )}
         </section>
 
         {/* Discount */}
@@ -507,9 +574,13 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
           <p className="text-xs font-bold uppercase flex items-center gap-1.5" style={sectionTitle}>
             <BadgePercent size={14} aria-hidden="true" /> Discount
           </p>
-          <Segmented value={v.discountMode} onChange={(m) => set('discountMode', m)} options={DISCOUNT_MODES} />
+          {overriding ? (
+            <p className="text-xs" style={{ color: '#6B7280' }}>No discount needed — the custom fare above is the final amount.</p>
+          ) : (
+            <Segmented value={v.discountMode} onChange={(m) => set('discountMode', m)} options={DISCOUNT_MODES} />
+          )}
 
-          {v.discountMode === 'PROMO' && (
+          {!overriding && v.discountMode === 'PROMO' && (
             <div>
               <div className="flex gap-2">
                 <div className="flex-1">
@@ -529,7 +600,7 @@ export default function BookingFormDrawer({ open, onClose, onCreated, initialCus
             </div>
           )}
 
-          {v.discountMode === 'CUSTOM' && (
+          {!overriding && v.discountMode === 'CUSTOM' && (
             <div className="space-y-2">
               <div className="flex gap-2">
                 <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: '#E5E7EB' }}>

@@ -29,9 +29,14 @@ export const canonicalClass = (raw, catalogueKeys = []) =>
  *     catalogue spelling (it IS the same class, this just fixes the data);
  *   - genuinely different class       → change the booking to the vehicle's
  *     class (PATCH /admin/bookings/:id/vehicle — the backend re-quotes fare).
+ * `fare` decides the booking's new fare when its class changes:
+ *   { fareMode: 'requote' }                       rate card (default)
+ *   { fareMode: 'keep', reason }                  customer's fare stays
+ *   { fareMode: 'custom', customFare, reason }    typed amount
+ * keep / custom need the FARE_EDIT permission on the backend.
  * Returns what was changed so the caller can tell the user.
  */
-export async function alignClasses({ booking, vehicle, catalogueKeys = [] }) {
+export async function alignClasses({ booking, vehicle, catalogueKeys = [], fare = null }) {
   const out = { vehicleFixedTo: null, bookingChangedTo: null };
   const b = booking?.vehicleClass;
   const v = vehicle?.vehicleClass;
@@ -44,8 +49,28 @@ export async function alignClasses({ booking, vehicle, catalogueKeys = [] }) {
     out.vehicleFixedTo = target;
   }
   if (b !== target) {
-    await apiClient.patch(`/admin/bookings/${booking.id}/vehicle`, { vehicleClass: target });
+    await apiClient.patch(`/admin/bookings/${booking.id}/vehicle`, { vehicleClass: target, ...fareBody(fare) });
     out.bookingChangedTo = target;
   }
   return out;
+}
+
+/** Request body fields for PATCH /admin/bookings/:id/vehicle from a fare choice. */
+export function fareBody(fare) {
+  if (!fare || !fare.fareMode || fare.fareMode === 'requote') {
+    return fare?.reason ? { fareMode: 'requote', reason: fare.reason } : {};
+  }
+  return {
+    fareMode: fare.fareMode,
+    ...(fare.fareMode === 'custom' ? { customFare: Number(fare.customFare) } : {}),
+    reason: fare.reason || undefined,
+  };
+}
+
+/** Why a fare choice can't be sent yet, or null when it can. */
+export function fareChoiceError(fare) {
+  if (!fare || !fare.fareMode || fare.fareMode === 'requote') return null;
+  if (fare.fareMode === 'custom' && !(Number(fare.customFare) > 0)) return 'Enter the new fare';
+  if (!String(fare.reason || '').trim()) return 'Give a reason for setting the fare by hand';
+  return null;
 }

@@ -5,7 +5,7 @@ import {
   CheckCircle, XCircle, Truck, PlayCircle, ClipboardList, FileText, Navigation,
 } from 'lucide-react';
 import { useApi } from '../../hooks/useApi';
-import { bookingService, bookingOpsService, adminService, vehicleService } from '../../services';
+import { bookingService, bookingOpsService, adminService, vehicleService, vehicleCatalogService } from '../../services';
 import { apiClient } from '../../services/apiClient';
 import Breadcrumb from '../../components/ui/Breadcrumb';
 import Card from '../../components/ui/Card';
@@ -17,12 +17,15 @@ import Alert from '../../components/ui/Alert';
 import Modal from '../../components/ui/Modal';
 import Select from '../../components/ui/Select';
 import Textarea from '../../components/ui/Textarea';
+import Input from '../../components/ui/Input';
 import FormField from '../../components/ui/FormField';
 import { useToast } from '../../hooks/useToast';
 import { useAuth } from '../../hooks/useAuth';
 import { PERMISSIONS, BOOKING_TRANSITIONS, BOOKING_STATUS } from '../../constants';
 import { formatCurrency, formatDate, formatDateTime, titleCase } from '../../utils/formatters';
-import { sameClass, alignClasses } from '../../utils/vehicleClass';
+import { sameClass, alignClasses, fareBody, fareChoiceError } from '../../utils/vehicleClass';
+import { announceBookingChange, onBookingChange } from '../../utils/bookingSync';
+import FareChoice, { DEFAULT_FARE_CHOICE } from '../../components/booking/FareChoice';
 
 // Helper: backend returns pickupAddress/dropAddress as { address: "..." } objects
 function addr(val) {
@@ -69,16 +72,45 @@ function AssignModal({ open, onClose, onAssign, booking }) {
   const [vehiclesTick, setVehiclesTick] = useState(0);
   const [drivers, setDrivers] = useState([]);
   const [loadingDistances, setLoadingDistances] = useState(false);
+  // Fare when the picked vehicle is another class (re-quote / keep / custom).
+  const [fare, setFare] = useState(DEFAULT_FARE_CHOICE);
+  // What each class would cost for this trip, to show beside "Re-quote".
+  const [quotes, setQuotes] = useState([]);
+
+  useEffect(() => { setFare(DEFAULT_FARE_CHOICE); }, [vehicleId]);
+
+  useEffect(() => {
+    if (!open || !booking?.id) return;
+    let cancelled = false;
+    apiClient.get(`/admin/bookings/${booking.id}/vehicle-options`)
+      .then((r) => { if (!cancelled) setQuotes(r?.options || []); })
+      .catch(() => { if (!cancelled) setQuotes([]); });
+    return () => { cancelled = true; };
+  }, [open, booking?.id]);
+  const quoteFor = (cls) => {
+    const q = quotes.find((o) => sameClass(o.vehicleClass, cls));
+    return q ? Number(q.total) : null;
+  };
 
   // The backend refuses a vehicle whose class differs from the booking's
   // ("Vehicle is sedan, booking needs swift-dzire"). The Dispatch board already
   // hides those; this list offered every available vehicle, so the wrong one
   // could be picked and only failed after pressing Assign.
+  //
+  // Locking the list to the booking's class left ops stuck whenever no vehicle
+  // of that exact class was free (the modal listed nothing and Assign stayed
+  // disabled). Like the Dispatch board, every free vehicle is now offered:
+  // same-class vehicles first, any other class marked, and picking one moves
+  // the booking to that class (fare re-quoted) on Assign — see alignClasses.
   const wantedClass = booking?.vehicleClass || '';
   // Compared ignoring case / spaces / hyphens — "Swift Dzire" is swift-dzire.
-  const matchingVehicles = wantedClass ? vehicles.filter((v) => sameClass(v.vehicleClass, wantedClass)) : vehicles;
-  const otherVehicles = wantedClass ? vehicles.filter((v) => !sameClass(v.vehicleClass, wantedClass)) : [];
-  const otherClassCount = otherVehicles.length;
+  const isMatch = (v) => !wantedClass || sameClass(v.vehicleClass, wantedClass);
+  const matchingVehicles = vehicles.filter(isMatch);
+  const sortedVehicles = [...vehicles].sort((a, b) => (isMatch(b) - isMatch(a))
+    || String(a.registrationNumber || '').localeCompare(String(b.registrationNumber || '')));
+  const pickedVehicle = vehicles.find((v) => v.id === vehicleId);
+  const pickedOtherClass = pickedVehicle && !isMatch(pickedVehicle);
+  const ownDriver = (vid) => drivers.find((d) => d.assignedVehicleId && d.assignedVehicleId === vid);
 
   // Available vehicles, read straight from the fleet (the database), NOT from
   // /admin/dispatch/vehicles: that list is cached by the backend for up to a
@@ -111,16 +143,27 @@ function AssignModal({ open, onClose, onAssign, booking }) {
   useEffect(() => {
     if (!open) return;
 
-    // Online + KYC-verified only — an offline or unverified driver can't
-    // actually take the trip, so offering them here would just set up a
-    // failed pickup.
+    // All KYC-verified drivers, online ones first. Filtering to online-only
+    // (status: 'online') usually returned nobody — a driver whose app isn't
+    // open right now still drives a vehicle and can be booked ahead for a
+    // scheduled trip. The Dispatch board lists everyone too; keep them in step.
     setLoadingDistances(true);
-    apiClient.get('/admin/drivers', { params: { kycStatus: 'VERIFIED', status: 'online', limit: 100 } })
-      .then(async (r) => {
-        const list = r.data || r.items || [];
+    (async () => {
+      const all = [];
+      let page = 1, totalPages = 1;
+      do {
+        const res = await apiClient.get('/admin/drivers', { params: { kycStatus: 'VERIFIED', limit: 100, page } });
+        all.push(...(res?.data ?? res?.items ?? []));
+        totalPages = res?.meta?.totalPages ?? res?.pagination?.totalPages ?? 1;
+        page += 1;
+      } while (page <= totalPages && page <= 20);
+      return all;
+    })()
+      .then(async (list) => {
         const lat = booking?.pickupLat, lng = booking?.pickupLng;
+        const onlineFirst = (arr) => [...arr].sort((a, b) => Number(!!b.isOnline) - Number(!!a.isOnline));
         if (!list.length || lat == null || lng == null) {
-          setDrivers(list.map((d) => ({ ...d, distanceKm: null })));
+          setDrivers(onlineFirst(list.map((d) => ({ ...d, distanceKm: null }))));
           return;
         }
         try {
@@ -137,6 +180,8 @@ function AssignModal({ open, onClose, onAssign, booking }) {
               : null,
           }));
           withDistance.sort((a, b) => {
+            if (a.isOnline && !b.isOnline) return -1;
+            if (!a.isOnline && b.isOnline) return 1;
             if (a.distanceKm == null && b.distanceKm == null) return 0;
             if (a.distanceKm == null) return 1;
             if (b.distanceKm == null) return -1;
@@ -145,20 +190,27 @@ function AssignModal({ open, onClose, onAssign, booking }) {
           setDrivers(withDistance);
         } catch {
           // Redis/location lookup down is not a reason to hide the driver
-          // list — just fall back to unranked.
-          setDrivers(list.map((d) => ({ ...d, distanceKm: null })));
+          // list — just fall back to online-first, unranked by distance.
+          setDrivers(onlineFirst(list.map((d) => ({ ...d, distanceKm: null }))));
         }
       })
       .catch(() => setDrivers([]))
       .finally(() => setLoadingDistances(false));
   }, [open, booking?.pickupLat, booking?.pickupLng]);
 
+  const fareError = pickedOtherClass ? fareChoiceError(fare) : null;
+
   const submit = async () => {
-    if (!vehicleId) return;
+    if (!vehicleId || fareError) return;
     setLoading(true);
-    await onAssign(vehicleId, driverId || undefined, vehicles.find((v) => v.id === vehicleId));
+    // No driver picked: send the vehicle's own driver, otherwise the trip
+    // reaches no driver app.
+    const effectiveDriverId = driverId || ownDriver(vehicleId)?.userId || undefined;
+    const ok = await onAssign(vehicleId, effectiveDriverId, pickedVehicle, pickedOtherClass ? fare : null);
     setLoading(false);
+    if (ok === false) return; // keep the modal open so the error can be fixed
     setDriverId('');
+    setVehicleId('');
     onClose();
   };
 
@@ -166,17 +218,20 @@ function AssignModal({ open, onClose, onAssign, booking }) {
     <Modal open={open} onClose={onClose} title="Assign vehicle" size="sm"
       footer={<>
         <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
-        <Button size="sm" loading={loading} onClick={submit} disabled={!vehicleId}>Assign</Button>
+        <Button size="sm" loading={loading} onClick={submit} disabled={!vehicleId || !!fareError} title={fareError || undefined}>Assign</Button>
       </>}
     >
       <div className="space-y-4">
         <FormField
           label="Vehicle"
           required
-          hint={wantedClass ? `Only ${wantedClass} vehicles are listed — this booking needs that class.` : undefined}
+          hint={wantedClass ? `${wantedClass} vehicles are listed first. Picking another class changes the booking to that class — you choose the fare.` : undefined}
         >
           <Select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} placeholder={vehiclesLoading ? 'Loading vehicles\u2026' : 'Select vehicle'}
-            options={matchingVehicles.map((v) => ({ value: v.id, label: `${v.registrationNumber} · ${v.makeModel || v.vehicleClass} (${v.seatingCapacity} seats)` }))} />
+            options={sortedVehicles.map((v) => ({
+              value: v.id,
+              label: `${v.registrationNumber} · ${v.makeModel || v.vehicleClass}${v.seatingCapacity ? ` (${v.seatingCapacity} seats)` : ''}${isMatch(v) ? '' : ` — ${v.vehicleClass} (different class)`}`,
+            }))} />
         </FormField>
         <button
           type="button"
@@ -186,25 +241,42 @@ function AssignModal({ open, onClose, onAssign, booking }) {
         >
           {vehiclesLoading ? 'Loading vehicles\u2026' : 'Refresh vehicle list'}
         </button>
-        {!vehiclesLoading && wantedClass && matchingVehicles.length === 0 && (
+        {!vehiclesLoading && vehicles.length === 0 && (
+          <Alert type="warning">No available vehicles right now. Add one in Vehicles, or release a vehicle from another trip.</Alert>
+        )}
+        {!vehiclesLoading && wantedClass && vehicles.length > 0 && matchingVehicles.length === 0 && !pickedVehicle && (
           <Alert type="warning">
-            No available <strong>{wantedClass}</strong> vehicle.
-            {otherClassCount > 0 && ` ${otherClassCount} available vehicle${otherClassCount > 1 ? 's are' : ' is'} of a different class and can't take this booking: ${otherVehicles.slice(0, 5).map((v) => `${v.registrationNumber} (${v.vehicleClass})`).join(', ')}${otherClassCount > 5 ? ` and ${otherClassCount - 5} more` : ''}.`}
-            {' '}Add one in Vehicles, or change an existing vehicle's class to {wantedClass}.
+            No available <strong>{wantedClass}</strong> vehicle. You can still pick one of the other {vehicles.length} vehicle{vehicles.length > 1 ? 's' : ''} above — the booking will move to that class and you choose the fare (re-quote, keep or custom).
+            If a vehicle's class is just misspelt (e.g. "dezire"), correct it under Vehicles instead.
           </Alert>
+        )}
+        {pickedOtherClass && (
+          <>
+            <Alert type="warning">
+              Booking is <strong>{wantedClass}</strong>, {pickedVehicle.registrationNumber} is <strong>{pickedVehicle.vehicleClass}</strong>.
+              Assigning will change the booking to {pickedVehicle.vehicleClass}.
+            </Alert>
+            <FareChoice
+              value={fare}
+              onChange={setFare}
+              newClass={pickedVehicle.vehicleClass}
+              currentFare={booking?.estimatedFare != null ? Number(booking.estimatedFare) : null}
+              quotedFare={quoteFor(pickedVehicle.vehicleClass)}
+            />
+          </>
         )}
         <FormField
           label="Driver"
-          hint={loadingDistances ? 'Ranking by live distance to pickup…' : 'Nearest online, KYC-verified drivers listed first.'}
+          hint={loadingDistances ? 'Ranking by live distance to pickup…' : (vehicleId && !driverId && ownDriver(vehicleId) ? `Left empty, ${ownDriver(vehicleId).user?.name || 'this vehicle\'s driver'} (drives this vehicle) gets the trip.` : 'Online drivers first, nearest to pickup first.')}
         >
           <Select value={driverId} onChange={(e) => setDriverId(e.target.value)} placeholder="Select driver (optional)"
             options={drivers.map((d, i) => ({
               value: d.userId,
-              label: `${i === 0 && d.distanceKm != null ? '⭐ ' : ''}${d.user?.name || 'Unnamed'} · ${d.user?.phone || ''}${d.distanceKm != null ? ` — ${d.distanceKm} km away` : ' — location unavailable'}`,
+              label: `${i === 0 && d.isOnline && d.distanceKm != null ? '⭐ ' : ''}${d.user?.name || 'Unnamed'} · ${d.user?.phone || ''}${d.isOnline ? (d.distanceKm != null ? ` — ${d.distanceKm} km away` : ' — online') : ' — offline'}${vehicleId && d.assignedVehicleId === vehicleId ? ' · drives this vehicle' : ''}`,
             }))} />
         </FormField>
         {drivers.length === 0 && !loadingDistances && (
-          <Alert type="info">No online, KYC-verified drivers right now — you can still assign the vehicle and add a driver later via Reassign.</Alert>
+          <Alert type="info">No KYC-verified drivers found — you can still assign the vehicle and add a driver later via Reassign.</Alert>
         )}
       </div>
     </Modal>
@@ -212,6 +284,69 @@ function AssignModal({ open, onClose, onAssign, booking }) {
 }
 
 
+
+// ── Edit fare modal (FARE_EDIT) ─────────────────────────────────────────────
+// PATCH /admin/bookings/:id/fare { fare, reason }. Same class, new price. The
+// backend re-splits what's owed against what's already paid, logs who/why, and
+// tells the customer. A lower fare than already collected is reported as a
+// refund due — nothing is refunded automatically.
+function EditFareModal({ open, onClose, booking, onSaved }) {
+  const toast = useToast();
+  const [fare, setFare] = useState('');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (open) { setFare(''); setReason(''); } }, [open]);
+
+  const current = Number(booking?.estimatedFare || 0);
+  const paid = Number(booking?.advancePaid || 0);
+  const n = Number(fare);
+  const valid = n > 0 && n !== current && reason.trim().length >= 3;
+
+  const save = async () => {
+    if (!valid) return;
+    setSaving(true);
+    try {
+      const res = await apiClient.patch(`/admin/bookings/${booking.id}/fare`, { fare: n, reason: reason.trim() });
+      const refund = Number(res?.change?.refundDue || 0);
+      toast.success(`Fare updated to ${formatCurrency(n)}${refund > 0 ? ` — ${formatCurrency(refund)} to refund` : ''}`);
+      onSaved?.(res?.booking);
+      onClose();
+    } catch (e) {
+      toast.error(e.message || 'Could not update the fare');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Edit fare" size="sm"
+      footer={<>
+        <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+        <Button size="sm" loading={saving} onClick={save} disabled={!valid}>Save fare</Button>
+      </>}
+    >
+      <div className="space-y-4">
+        <p className="text-xs" style={{ color: '#6B7280' }}>
+          Current fare: <strong>{formatCurrency(current)}</strong>{paid > 0 && <> · already paid {formatCurrency(paid)}</>}.
+          The class stays <strong>{booking?.vehicleClass}</strong>.
+        </p>
+        <FormField label="New fare (₹)" required>
+          <Input value={fare} onChange={(e) => setFare(e.target.value.replace(/[^0-9.]/g, ''))} inputMode="decimal" placeholder={String(Math.round(current))} />
+        </FormField>
+        <FormField label="Reason" required hint="Saved in the audit log and the booking's fare history.">
+          <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Extra stop agreed, corporate rate, complaint" maxLength={500} />
+        </FormField>
+        {n > 0 && n !== current && (
+          <Alert type={n > current ? 'warning' : 'info'}>
+            {formatCurrency(Math.abs(n - current))} {n > current ? 'more' : 'less'} than now.
+            {paid > 0 && (n >= paid
+              ? ` Customer will owe ${formatCurrency(n - paid)}.`
+              : ` ${formatCurrency(paid - n)} will be due as a refund (not refunded automatically).`)}
+            {' '}The customer gets a notification.
+          </Alert>
+        )}
+      </div>
+    </Modal>
+  );
+}
 
 // ── Cancel modal — requires a real, typed reason ────────────────────────────
 // Previously "Cancel Booking" called transition() straight away with a
@@ -301,6 +436,8 @@ export default function BookingDetail() {
   const toast = useToast();
   const { hasPermission } = useAuth();
   const canManage = hasPermission(PERMISSIONS.BOOKINGS_MANAGE);
+  const canEditFare = hasPermission(PERMISSIONS.FARE_EDIT);
+  const [editFareOpen, setEditFareOpen] = useState(false);
 
   const fetchBooking = useCallback(() => bookingService.get(bookingId), [bookingId]);
   const { data: booking, status, error, refetch, setData } = useApi(fetchBooking, [bookingId]);
@@ -313,7 +450,31 @@ export default function BookingDetail() {
   const [vehicleOptions, setVehicleOptions] = useState(null);
   const [changingVehicle, setChangingVehicle] = useState(false);
   const [selectedNewClass, setSelectedNewClass] = useState('');
+  const [changeFare, setChangeFare] = useState(DEFAULT_FARE_CHOICE);
+  const [catalogueClasses, setCatalogueClasses] = useState([]);
   const [hasInvoice, setHasInvoice] = useState(false);
+
+  // ── Live sync ────────────────────────────────────────────────────────────
+  // A vehicle assigned, class changed or fare re-priced on the Dispatch board
+  // (this tab, another tab, or another staff member via the socket) reloads
+  // this booking in place — quietly, without the full-page loading state.
+  useEffect(() => {
+    if (!bookingId) return undefined;
+    let timer = null;
+    const silentRefresh = () => {
+      clearTimeout(timer);
+      // Small debounce: one assign fires several events (class change, allocation, status).
+      timer = setTimeout(() => {
+        bookingService.get(bookingId).then((b) => { if (b) setData(b); }).catch(() => {});
+      }, 300);
+    };
+    const off = onBookingChange(({ bookingId: changed }) => {
+      if (!changed || String(changed) === String(bookingId)) silentRefresh();
+    });
+    const onVisible = () => { if (document.visibilityState === 'visible') silentRefresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { off(); clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [bookingId, setData]);
 
   useEffect(() => {
     if (!booking) return;
@@ -335,6 +496,7 @@ export default function BookingDetail() {
     try {
       const updated = await bookingOpsService.transition(booking.id, nextStatus, extraData);
       setData(updated.booking || updated);
+      announceBookingChange(booking.id);
       toast.success(`Booking → ${nextStatus.replace('_', ' ')}`);
     } catch (e) {
       toast.error(e.message);
@@ -356,6 +518,7 @@ export default function BookingDetail() {
     try {
       const updated = await bookingOpsService.cancel(booking.id, { reason, cancelledByType: 'ADMIN' });
       setData(updated.booking || updated);
+      announceBookingChange(booking.id);
       toast.success('Booking cancelled');
     } catch (e) {
       toast.error(e.message);
@@ -373,6 +536,7 @@ export default function BookingDetail() {
         note ? { note } : {},
       );
       setData(updated.booking || updated);
+      announceBookingChange(booking.id);
       toast.success('Booking confirmed');
     } catch (e) {
       toast.error(e.message);
@@ -380,20 +544,31 @@ export default function BookingDetail() {
     }
   };
 
-  const handleAssign = async (vehicleId, driverId, vehicle) => {
+  const handleAssign = async (vehicleId, driverId, vehicle, fare = null) => {
     setTransitioning(true);
     try {
       // Same class but spelled differently ("Swift-Dzire" vs "swift-dzire"):
       // the backend compares exactly, so correct the vehicle's spelling first.
-      if (vehicle) await alignClasses({ booking, vehicle });
+      // A different class moves the booking to the vehicle's class (re-quoted).
+      if (vehicle) {
+        let catalogueKeys = [];
+        try { catalogueKeys = (await vehicleCatalogService.classOptions({ includeInactive: true })).map((o) => o.value); } catch { /* spelling fallback only */ }
+        const aligned = await alignClasses({ booking, vehicle, catalogueKeys, fare });
+        if (aligned.bookingChangedTo) announceBookingChange(booking.id);
+        if (aligned.bookingChangedTo) toast.success(`Booking changed to ${aligned.bookingChangedTo} — fare re-quoted`);
+      }
       // The real endpoint returns { allocation }, not the full updated
       // booking — refetch the booking fresh so its status reflects the
       // new allocation correctly rather than guessing at a merge.
       await apiClient.post(`/admin/dispatch/bookings/${booking.id}/assign`, { vehicleId, driverId });
       toast.success(driverId ? 'Vehicle and driver assigned' : 'Vehicle assigned');
       refetch();
+      announceBookingChange(booking.id);
+      return true;
     } catch (e) {
       toast.error(e.message);
+      refetch(); // the class may already have changed before the assign failed
+      return false;
     } finally {
       setTransitioning(false);
     }
@@ -405,7 +580,11 @@ export default function BookingDetail() {
       const res = await apiClient.get(`/admin/bookings/${booking.id}/vehicle-options`);
       const options = res?.options || res?.vehicleOptions || res || [];
       setVehicleOptions(Array.isArray(options) ? options : []);
+      // Every catalogue class can be picked, not only the ones with a rate card
+      // for this trip — those just need the fare kept or typed.
+      try { setCatalogueClasses(await vehicleCatalogService.classOptions()); } catch { setCatalogueClasses([]); }
       setSelectedNewClass('');
+      setChangeFare(DEFAULT_FARE_CHOICE);
       setVehicleChangeOpen(true);
     } catch (e) {
       toast.error(e.message || 'Could not load vehicle options');
@@ -414,11 +593,15 @@ export default function BookingDetail() {
 
   const handleVehicleChange = async () => {
     if (!selectedNewClass) { toast.error('Select a vehicle class'); return; }
+    const err = fareChoiceError(changeFare);
+    if (err) { toast.error(err); return; }
     setChangingVehicle(true);
     try {
-      const updated = await apiClient.patch(`/admin/bookings/${booking.id}/vehicle`, { vehicleClass: selectedNewClass });
+      const updated = await apiClient.patch(`/admin/bookings/${booking.id}/vehicle`, { vehicleClass: selectedNewClass, ...fareBody(changeFare) });
       setData(updated.booking || updated);
-      toast.success(`Vehicle changed to ${selectedNewClass} — fare re-quoted`);
+      announceBookingChange(booking.id);
+      const how = changeFare.fareMode === 'keep' ? 'fare kept' : changeFare.fareMode === 'custom' ? 'fare set' : 'fare re-quoted';
+      toast.success(`Vehicle changed to ${selectedNewClass} — ${how}`);
       setVehicleChangeOpen(false);
       refetch();
     } catch (e) {
@@ -615,12 +798,25 @@ export default function BookingDetail() {
               )}
             </Card>
 
-            {/* Vehicle class change — available for CONFIRMED/ALLOCATED/EN_ROUTE */}
-            {['CONFIRMED', 'ALLOCATED', 'EN_ROUTE'].includes(booking.status) && (
+            {/* Fare edit — FARE_EDIT only, same statuses the backend allows */}
+            {canEditFare && ['PENDING', 'CONFIRMED', 'ALLOCATED'].includes(booking.status) && (
+              <Card>
+                <h3 className="font-bold text-sm mb-3" style={{ color: '#1F2937' }}>Fare</h3>
+                <p className="text-xs mb-2" style={{ color: '#6B7280' }}>
+                  Change the price without changing the vehicle. Already-paid amounts are kept.
+                </p>
+                <Button className="w-full" variant="secondary" icon={IndianRupee} onClick={() => setEditFareOpen(true)}>
+                  Edit Fare
+                </Button>
+              </Card>
+            )}
+
+            {/* Vehicle class change — the statuses the backend allows (PENDING/CONFIRMED/ALLOCATED) */}
+            {['PENDING', 'CONFIRMED', 'ALLOCATED'].includes(booking.status) && (
               <Card>
                 <h3 className="font-bold text-sm mb-3" style={{ color: '#1F2937' }}>Change Vehicle</h3>
                 <p className="text-xs mb-2" style={{ color: '#6B7280' }}>
-                  Switch to a different vehicle class. The fare will be automatically re-quoted at the new class's rate.
+                  Switch to a different vehicle class. The fare is re-quoted at the new class's rate{canEditFare ? ', or you can keep it or set your own' : ''}.
                 </p>
                 <Button className="w-full" variant="secondary" icon={Truck} onClick={openVehicleChange}>
                   Change Vehicle Class
@@ -653,42 +849,76 @@ export default function BookingDetail() {
 
       <AssignModal open={assignOpen} onClose={() => setAssignOpen(false)} onAssign={handleAssign} booking={booking} />
       <CancelModal open={cancelOpen} onClose={() => setCancelOpen(false)} onConfirm={handleCancel} />
+      <EditFareModal open={editFareOpen} onClose={() => setEditFareOpen(false)} booking={booking}
+        onSaved={(b) => { if (b) setData(b); refetch(); announceBookingChange(booking.id); }} />
       <ConfirmModal open={confirmOpen} onClose={() => setConfirmOpen(false)} onConfirm={handleConfirm} bookingNumber={booking.bookingNumber} />
 
-      {/* Vehicle Change Modal */}
+      {/* Vehicle Change Modal
+          GET /admin/bookings/:id/vehicle-options returns
+          { options: [{ vehicleClass, name, seats, current, total, difference }] }.
+          The Select component only renders its `options` prop — the old
+          <option> children were silently dropped, so the menu opened empty.
+          The fare also read estimatedFare/fare, which the endpoint never sends
+          (it's `total`), so every class would have shown ₹0. */}
       <Modal open={vehicleChangeOpen} onClose={() => setVehicleChangeOpen(false)} title="Change Vehicle Class" size="sm"
         footer={<><Button variant="secondary" onClick={() => setVehicleChangeOpen(false)}>Cancel</Button>
-          <Button loading={changingVehicle} onClick={handleVehicleChange} disabled={!selectedNewClass}>Change & Re-quote</Button></>}>
-        {vehicleOptions && vehicleOptions.length > 0 ? (
-          <div className="space-y-3">
-            <p className="text-xs" style={{ color: '#6B7280' }}>
-              Current class: <strong>{booking.vehicleClass}</strong>. Select a new class below — the fare will be recalculated.
-            </p>
-            <FormField label="New Vehicle Class">
-              <Select value={selectedNewClass} onChange={(e) => setSelectedNewClass(e.target.value)}>
-                <option value="">Select…</option>
-                {vehicleOptions.filter((o) => o.vehicleClass !== booking.vehicleClass).map((o) => (
-                  <option key={o.vehicleClass} value={o.vehicleClass}>
-                    {o.vehicleClass} — {formatCurrency(o.estimatedFare || o.fare || 0)}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
-            {selectedNewClass && (() => {
-              const opt = vehicleOptions.find((o) => o.vehicleClass === selectedNewClass);
-              const diff = opt ? (opt.estimatedFare || opt.fare || 0) - (booking.estimatedFare || 0) : 0;
-              return opt ? (
+          <Button loading={changingVehicle} onClick={handleVehicleChange} disabled={!selectedNewClass || !!fareChoiceError(changeFare)}>
+            {changeFare.fareMode === 'keep' ? 'Change class' : changeFare.fareMode === 'custom' ? 'Change & set fare' : 'Change & Re-quote'}
+          </Button></>}>
+        {(() => {
+          const optFare = (o) => Number(o.total ?? o.estimatedFare ?? o.fare ?? 0);
+          const priced = (vehicleOptions || []).filter((o) => !o.current && !sameClass(o.vehicleClass, booking.vehicleClass));
+          // Catalogue classes with no rate card for this trip: selectable, but
+          // the fare must be kept or typed (re-quote would fail).
+          const unpriced = catalogueClasses
+            .filter((c) => !sameClass(c.value, booking.vehicleClass) && !priced.some((o) => sameClass(o.vehicleClass, c.value)))
+            .map((c) => ({ vehicleClass: c.value, name: c.label, seats: c.seats, unpriced: true }));
+          const others = [...priced, ...unpriced];
+          if (!others.length) {
+            return <p className="text-sm" style={{ color: '#6B7280' }}>No other vehicle classes are available for this trip.</p>;
+          }
+          const opt = others.find((o) => o.vehicleClass === selectedNewClass);
+          const currentFare = Number(booking.estimatedFare || 0);
+          const newFare = !opt ? null
+            : changeFare.fareMode === 'keep' ? currentFare
+              : changeFare.fareMode === 'custom' ? (Number(changeFare.customFare) > 0 ? Number(changeFare.customFare) : null)
+                : (opt.unpriced ? null : optFare(opt));
+          const diff = newFare != null ? newFare - currentFare : 0;
+          return (
+            <div className="space-y-3">
+              <p className="text-xs" style={{ color: '#6B7280' }}>
+                Current class: <strong>{booking.vehicleClass}</strong> at {formatCurrency(currentFare)}. Pick a new class, then choose how the fare is set.
+              </p>
+              <FormField label="New Vehicle Class">
+                <Select
+                  value={selectedNewClass}
+                  onChange={(e) => { setSelectedNewClass(e.target.value); setChangeFare(DEFAULT_FARE_CHOICE); }}
+                  placeholder="Select…"
+                  options={others.map((o) => ({
+                    value: o.vehicleClass,
+                    label: `${o.name || o.vehicleClass}${o.seats ? ` · ${o.seats} seats` : ''} — ${o.unpriced ? 'no rate card, set fare' : formatCurrency(optFare(o))}`,
+                  }))}
+                />
+              </FormField>
+              {opt && (
+                <FareChoice
+                  value={changeFare}
+                  onChange={setChangeFare}
+                  newClass={opt.name || opt.vehicleClass}
+                  currentFare={currentFare}
+                  quotedFare={opt.unpriced ? null : optFare(opt)}
+                />
+              )}
+              {opt && newFare != null && (
                 <Alert type={diff > 0 ? 'warning' : 'info'}>
-                  New fare: {formatCurrency(opt.estimatedFare || opt.fare || 0)}
-                  {diff !== 0 && <span> ({diff > 0 ? '+' : ''}{formatCurrency(diff)} {diff > 0 ? 'more' : 'less'})</span>}
+                  New fare: {formatCurrency(newFare)}
+                  {diff !== 0 && <span> ({formatCurrency(Math.abs(diff))} {diff > 0 ? 'more' : 'less'})</span>}
                   . Already-paid amounts will be adjusted.
                 </Alert>
-              ) : null;
-            })()}
-          </div>
-        ) : (
-          <p className="text-sm" style={{ color: '#6B7280' }}>No other vehicle classes are available for this trip.</p>
-        )}
+              )}
+            </div>
+          );
+        })()}
       </Modal>
     </div>
   );

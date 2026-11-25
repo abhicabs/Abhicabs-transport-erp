@@ -29,7 +29,9 @@ import { dispatchService } from '../../services/dispatchService';
 import { bookingOpsService } from '../../services/bookingOpsService';
 import { vehicleService } from '../../services';
 import { vehicleCatalogService } from '../../services/vehicleCatalogService';
-import { sameClass, canonicalClass, alignClasses } from '../../utils/vehicleClass';
+import { sameClass, canonicalClass, alignClasses, fareChoiceError } from '../../utils/vehicleClass';
+import { announceBookingChange, onBookingChange } from '../../utils/bookingSync';
+import FareChoice, { DEFAULT_FARE_CHOICE } from '../../components/booking/FareChoice';
 import { approveTemporaryDriver } from '../../services/compatService';
 
 // Giving a hired driver a car that is already in the fleet needs the newer
@@ -99,6 +101,37 @@ export default function Dispatch() {
   const catalogueKeys = classOptions.map((o) => o.value);
 
   const refreshAll = () => { board.refetch(); driversApi.refetch(); setFleetTick((t) => t + 1); refreshUnassigned?.(); };
+
+  // A booking changed elsewhere (the booking page, another tab, another staff
+  // member via the socket) — reload the board so it never shows a stale class,
+  // fare or assignment. Debounced: one change can fire several events.
+  const refreshAllRef = useRef(refreshAll);
+  refreshAllRef.current = refreshAll;
+  useEffect(() => {
+    let timer = null;
+    const off = onBookingChange(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => refreshAllRef.current(), 400);
+    });
+    return () => { off(); clearTimeout(timer); };
+  }, []);
+
+  // What each class would cost per booking (for the fare choice), fetched the
+  // first time a different-class vehicle is picked for that booking.
+  const [classQuotes, setClassQuotes] = useState({});
+  const loadQuotes = useCallback((bookingId) => {
+    if (!bookingId || classQuotes[bookingId]) return;
+    setClassQuotes((p) => ({ ...p, [bookingId]: { loading: true, options: [] } }));
+    apiClient.get(`/admin/bookings/${bookingId}/vehicle-options`)
+      .then((r) => setClassQuotes((p) => ({ ...p, [bookingId]: { options: r?.options || [] } })))
+      .catch(() => setClassQuotes((p) => ({ ...p, [bookingId]: { options: [], failed: true } })));
+  }, [classQuotes]);
+  const quotedFareFor = (bookingId, cls) => {
+    const q = classQuotes[bookingId];
+    if (!q || q.loading || q.failed) return undefined; // unknown
+    const o = q.options.find((x) => sameClass(x.vehicleClass, cls));
+    return o ? Number(o.total) : null;               // null = no rate card
+  };
 
   useEffect(() => {
     if (!lastBookingEventId) return;
@@ -176,6 +209,7 @@ export default function Dispatch() {
       });
 
       setAssignments((p) => ({ ...p, [bookingId]: { vehicleId, driverId, done: true } }));
+      announceBookingChange(bookingId);
       toast.success(`${m.driverName.trim()} (${useFleet ? fleetVehicle.registrationNumber : m.vehicleNumber.trim()}) added and assigned`);
       setTimeout(refreshAll, 800);
     } catch (e) {
@@ -247,15 +281,29 @@ export default function Dispatch() {
     );
   };
 
-  // Warning shown under the vehicle select when the pick is another class.
-  const classChangeNote = (booking, vehicleId) => {
+  // Warning + fare choice under the vehicle select when the pick is another class.
+  // `key` is the assignments key (booking id, or reassign-<id>).
+  const isOtherClass = (booking, vehicleId) => {
     const v = availableVehicles.find((x) => x.id === vehicleId);
-    if (!v || !booking.vehicleClass || sameClass(v.vehicleClass, booking.vehicleClass)) return null;
+    return !!(v && booking?.vehicleClass && !sameClass(v.vehicleClass, booking.vehicleClass));
+  };
+  const classChangeNote = (booking, vehicleId, key = booking.id) => {
+    const v = availableVehicles.find((x) => x.id === vehicleId);
+    if (!isOtherClass(booking, vehicleId)) return null;
     return (
-      <p className="text-xs rounded-lg px-3 py-2" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E' }}>
-        Booking is <strong>{titleCase(booking.vehicleClass)}</strong>, this vehicle is <strong>{titleCase(v.vehicleClass)}</strong>.
-        Assigning will change the booking to {titleCase(v.vehicleClass)} and re-quote the fare.
-      </p>
+      <div className="space-y-2">
+        <p className="text-xs rounded-lg px-3 py-2" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E' }}>
+          Booking is <strong>{titleCase(booking.vehicleClass)}</strong>, this vehicle is <strong>{titleCase(v.vehicleClass)}</strong>.
+          Assigning will change the booking to {titleCase(v.vehicleClass)}.
+        </p>
+        <FareChoice
+          value={assignments[key]?.fare || DEFAULT_FARE_CHOICE}
+          onChange={(fare) => setAssignments((p) => ({ ...p, [key]: { ...p[key], fare } }))}
+          newClass={titleCase(v.vehicleClass)}
+          currentFare={booking.estimatedFare != null ? Number(booking.estimatedFare) : null}
+          quotedFare={quotedFareFor(booking.id, v.vehicleClass)}
+        />
+      </div>
     );
   };
 
@@ -263,20 +311,34 @@ export default function Dispatch() {
     return sortedDrivers.filter((d) => !assignedDriverIds.has(d.userId));
   }
 
-  const setField = (bookingId, key, value) =>
-    setAssignments((p) => ({ ...p, [bookingId]: { ...p[bookingId], [key]: value } }));
+  const setField = (bookingId, key, value) => {
+    // Fetch per-class fares for the fare choice the first time a vehicle is picked.
+    if (key === 'vehicleId' && value) loadQuotes(String(bookingId).replace(/^reassign-/, ''));
+    setAssignments((p) => ({
+      ...p,
+      [bookingId]: { ...p[bookingId], [key]: value, ...(key === 'vehicleId' ? { fare: DEFAULT_FARE_CHOICE } : {}) },
+    }));
+  };
 
   const assign = useCallback(async (bookingId) => {
     const a = assignments[bookingId];
     if (!a?.vehicleId) { toast.error('Select a vehicle before assigning.'); return; }
+    const bookingRow = pendingBookings.find((b) => b.id === bookingId);
+    const fare = isOtherClass(bookingRow, a.vehicleId) ? (a.fare || DEFAULT_FARE_CHOICE) : null;
+    const fareErr = fareChoiceError(fare);
+    if (fareErr) { toast.error(fareErr); return; }
     setAssigning((p) => ({ ...p, [bookingId]: true }));
     try {
       const aligned = await alignClasses({
-        booking: pendingBookings.find((b) => b.id === bookingId),
+        booking: bookingRow,
         vehicle: availableVehicles.find((v) => v.id === a.vehicleId),
         catalogueKeys,
+        fare,
       });
-      if (aligned.bookingChangedTo) toast.success(`Booking changed to ${titleCase(aligned.bookingChangedTo)} — fare re-quoted`);
+      if (aligned.bookingChangedTo) {
+        toast.success(`Booking changed to ${titleCase(aligned.bookingChangedTo)} — ${fare?.fareMode === 'keep' ? 'fare kept' : fare?.fareMode === 'custom' ? 'fare set' : 'fare re-quoted'}`);
+        announceBookingChange(bookingId);
+      }
 
       // No driver picked: send the vehicle's own driver. Without a driver on the
       // assignment the trip never appears in any driver app, and staff end up
@@ -287,6 +349,7 @@ export default function Dispatch() {
         ...(driverId ? { driverId } : {}),
       });
       setAssignments((p) => ({ ...p, [bookingId]: { ...p[bookingId], driverId, done: true } }));
+      announceBookingChange(bookingId);
       const vehicle = availableVehicles.find((v) => v.id === a.vehicleId);
       const driver  = sortedDrivers.find((d) => d.userId === driverId);
       toast.success(
@@ -314,12 +377,24 @@ export default function Dispatch() {
       // vehicle so the request validates instead of failing with a 400.
       let vehicleId = a.vehicleId || null;
       if (vehicleId) {
+        const trip = liveTrips.find((t) => t.id === bookingId);
+        const fare = isOtherClass(trip, vehicleId) ? (a.fare || DEFAULT_FARE_CHOICE) : null;
+        const fareErr = fareChoiceError(fare);
+        if (fareErr) {
+          toast.error(fareErr);
+          setAssigning((p) => ({ ...p, [`reassign-${bookingId}`]: false }));
+          return;
+        }
         const aligned = await alignClasses({
-          booking: liveTrips.find((t) => t.id === bookingId),
+          booking: trip,
           vehicle: availableVehicles.find((v) => v.id === vehicleId),
           catalogueKeys,
+          fare,
         });
-        if (aligned.bookingChangedTo) toast.success(`Booking changed to ${titleCase(aligned.bookingChangedTo)} — fare re-quoted`);
+        if (aligned.bookingChangedTo) {
+          toast.success(`Booking changed to ${titleCase(aligned.bookingChangedTo)} — ${fare?.fareMode === 'keep' ? 'fare kept' : fare?.fareMode === 'custom' ? 'fare set' : 'fare re-quoted'}`);
+          announceBookingChange(bookingId);
+        }
       }
       if (!vehicleId) {
         const alloc = await dispatchService.allocation(bookingId);
@@ -344,6 +419,7 @@ export default function Dispatch() {
         ...(driverId ? { driverId } : {}),
       });
       setAssignments((p) => ({ ...p, [`reassign-${bookingId}`]: { ...p[`reassign-${bookingId}`], done: true } }));
+      announceBookingChange(bookingId);
       toast.success('Booking reassigned successfully');
       setTimeout(refreshAll, 800);
     } catch (e) {
@@ -811,7 +887,7 @@ export default function Dispatch() {
                             />
                             <Button size="sm" variant="secondary" icon={PlusCircle} onClick={() => openNewVehicle(aKey)}>New vehicle</Button>
                           </div>
-                          {classChangeNote(t, a.vehicleId)}
+                          {classChangeNote(t, a.vehicleId, `reassign-${t.id}`)}
                           <div className="flex gap-2 items-center">
                             <User size={15} style={{ color: '#6B7280', flexShrink: 0 }} />
                             <Select

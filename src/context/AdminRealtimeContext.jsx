@@ -23,6 +23,7 @@
  * pollRequests below.
  */
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import { announceBookingChange } from '../utils/bookingSync';
 import { useToast } from '../hooks/useToast';
 import { API_BASE_URL, USE_MOCK, apiClient } from '../services/apiClient';
 import { getToken } from '../services/authStorage';
@@ -512,6 +513,7 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
             { duration: 6000 }
           );
           pushFeedItem({ kind: 'booking:created', ...payload });
+          announceBookingChange(payload.bookingId || null, { broadcast: false });
 
           // Let the Dashboard know a booking (not just any event) arrived, so it
           // refetches its KPI/recent-booking cards.
@@ -566,6 +568,9 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
 
         socket.on('trip:status', (payload) => {
           pushFeedItem({ kind: 'trip:status', ...payload });
+          // Open booking page / Dispatch board reload (each tab has its own
+          // socket, so this stays local to the tab).
+          announceBookingChange(payload.bookingId || payload.id || null, { broadcast: false });
           // If a tracked new-booking moved past PENDING (confirmed/cancelled/etc.
           // anywhere), stop nagging about it.
           const bid = payload.bookingId || payload.id;
@@ -577,11 +582,21 @@ export function AdminRealtimeProvider({ children, enabled = true }) {
         socket.on('booking:allocated', (payload) => {
           toast.info(`Booking ${payload.bookingId} allocated a vehicle`, { duration: 5000 });
           pushFeedItem({ kind: 'booking:allocated', ...payload });
+          announceBookingChange(payload.bookingId || null, { broadcast: false });
+        });
+
+        // Class changed (and the fare with it) — from Dispatch, the booking
+        // page or anyone else. Previously not listened for at all, so other
+        // screens kept the old class and fare until reloaded.
+        socket.on('trip:vehicle_changed', (payload) => {
+          pushFeedItem({ kind: 'trip:vehicle_changed', ...payload });
+          announceBookingChange(payload.bookingId || null, { broadcast: false });
         });
 
         socket.on('payment:received', (payload) => {
           toast.success(`Payment received — ₹${payload.amount} (${payload.purpose})`, { duration: 5000 });
           pushFeedItem({ kind: 'payment:received', ...payload });
+          if (payload.bookingId) announceBookingChange(payload.bookingId, { broadcast: false });
         });
       } catch (err) {
         console.warn('[realtime] socket.io-client unavailable:', err.message);

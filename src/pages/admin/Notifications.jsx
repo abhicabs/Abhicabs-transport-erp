@@ -32,6 +32,7 @@ const KIND_CONFIG = {
   'admin:alert':       { label: 'Attempt Failed',    tone: 'red',   Icon: AlertTriangle },
   'trip:status':       { label: 'Status Changed',    tone: 'blue',  Icon: Car },
   'booking:allocated': { label: 'Vehicle Allocated', tone: 'purple',Icon: Car },
+  'trip:vehicle_changed': { label: 'Vehicle Class Changed', tone: 'amber', Icon: Car },
   'payment:received':  { label: 'Payment Received',  tone: 'green', Icon: CreditCard },
   // NEW — polled, not pushed live. See AdminRealtimeContext.jsx for why.
   'booking:abandoned': { label: 'Abandoned Booking',  tone: 'amber', Icon: AlertTriangle },
